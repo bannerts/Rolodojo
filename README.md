@@ -1,5 +1,9 @@
 # 🏯 ROLODOJO
 
+#AWAKENING PROMPT
+"Sensei, initialize the Dojo. Index the Instruction Set and the 8 scrolls in this directory. Refer to @ROLODOJO_PLAN.md and @ROLODOJO_SYSTEM_MANIFEST.md to begin Phase 1. Start by creating the folder structure for a Flutter Clean Architecture project. Do not begin coding until you provide a 'Project Heartbeat' summary of our database and security architecture for my approval."
+
+
 **Privacy-First | Local-Encrypted | AI-Orchestrated Personal Ledger**
 
 ROLODOJO is a "Digital Sensei" built with Flutter. It manages contacts, entities, and history through a structured, URI-addressable system. Every fact is audited, every change is ledgered, and all data is locked behind SQLCipher and Biometrics.
