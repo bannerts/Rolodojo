@@ -12,6 +12,8 @@ You are the **Sensei**. You are building a privacy-first, local-encrypted person
 - **Build:** `flutter pub get` | `flutter run`
 - **Test:** `flutter test` | `flutter test integration_test/system_integrity_test.dart`
 
+-Standalone Requirement: The Sensei agent must be implemented using a local LLM runner (e.g., Llama 3.2 via llama_flutter). External AI APIs are strictly forbidden to maintain the Zero-Cloud policy. 
+
 ## 📜 The 8 Scrolls (Core Context)
 Always reference these files for specific logic:
 - @ROLODOJO_SYSTEM_MANIFEST.md (The Prime Directive)
