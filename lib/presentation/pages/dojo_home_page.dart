@@ -5,6 +5,7 @@ import '../../core/utils/uri_utils.dart';
 import '../widgets/flip_card.dart';
 import '../widgets/sensei_bar.dart';
 import 'search_page.dart';
+import 'settings_page.dart';
 
 /// The main home page of the Dojo application.
 ///
@@ -116,6 +117,17 @@ class _DojoHomePageState extends State<DojoHomePage> {
               _showSearchDialog(context);
             },
             tooltip: 'Search the Vault',
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => const SettingsPage(),
+                ),
+              );
+            },
+            tooltip: 'Settings',
           ),
         ],
       ),
