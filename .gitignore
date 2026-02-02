@@ -20,7 +20,7 @@ secrets.json
 .pub-cache/
 .pub/
 build/
-core
+/core
 /ios/.generated_files
 
 # --- ANDROID ---
