@@ -4,6 +4,7 @@ import '../../core/services/input_parser.dart';
 import '../../core/utils/uri_utils.dart';
 import '../widgets/flip_card.dart';
 import '../widgets/sensei_bar.dart';
+import 'search_page.dart';
 
 /// The main home page of the Dojo application.
 ///
@@ -426,27 +427,9 @@ class _DojoHomePageState extends State<DojoHomePage> {
   }
 
   void _showSearchDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: DojoColors.graphite,
-        title: const Row(
-          children: [
-            Icon(Icons.search, color: DojoColors.senseiGold),
-            SizedBox(width: 8),
-            Text('Search the Vault', style: TextStyle(color: DojoColors.textPrimary)),
-          ],
-        ),
-        content: const Text(
-          'Full Librarian search will be implemented in Phase 3.',
-          style: TextStyle(color: DojoColors.textSecondary),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => const SearchPage(),
       ),
     );
   }
