@@ -265,24 +265,46 @@ class _SettingsPageState extends State<SettingsPage> {
   void _handleExport() async {
     setState(() => _isExporting = true);
 
-    // Simulate export delay (in production, use file_picker)
-    await Future.delayed(const Duration(seconds: 2));
-
-    if (mounted) {
-      setState(() => _isExporting = false);
-      _showSnackBar('Backup exported successfully (demo mode)');
+    if (widget.backupService != null) {
+      try {
+        final result = await widget.backupService!.exportBackup(
+          directory: '/tmp',
+        );
+        if (mounted) {
+          setState(() => _isExporting = false);
+          if (result.success) {
+            final meta = result.metadata!;
+            _showSnackBar(
+              'Exported ${meta.totalItems} items to ${result.filePath}',
+            );
+          } else {
+            _showSnackBar('Export failed: ${result.error}');
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() => _isExporting = false);
+          _showSnackBar('Export error: $e');
+        }
+      }
+    } else {
+      await Future.delayed(const Duration(seconds: 2));
+      if (mounted) {
+        setState(() => _isExporting = false);
+        _showSnackBar('Backup exported successfully (demo mode)');
+      }
     }
   }
 
   void _handleImport() async {
     setState(() => _isImporting = true);
 
-    // Simulate import delay (in production, use file_picker)
-    await Future.delayed(const Duration(seconds: 2));
-
+    // In production, use file_picker to select a .dojo file
+    // For now, show a message since we can't pick files without the package
+    await Future.delayed(const Duration(milliseconds: 500));
     if (mounted) {
       setState(() => _isImporting = false);
-      _showSnackBar('Backup import (demo mode - use file picker in production)');
+      _showSnackBar('Import requires file_picker package for file selection');
     }
   }
 
