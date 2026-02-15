@@ -37,6 +37,9 @@ class SecurityService {
   }
 
   static Future<void> _initializeSchema(Database db) async {
+    // Enable foreign key enforcement for SQLite
+    await db.execute('PRAGMA foreign_keys = ON');
+
     // Initializing the 3 Pillars of the Rockstone Schema
 
     // tbl_rolos - The Ledger (immutable history)
@@ -48,7 +51,9 @@ class SecurityService {
         target_uri TEXT,
         parent_rolo_id TEXT,
         metadata TEXT,
-        timestamp TEXT NOT NULL
+        timestamp TEXT NOT NULL,
+        FOREIGN KEY (parent_rolo_id) REFERENCES tbl_rolos(rolo_id)
+          ON DELETE SET NULL
       )
     ''');
 
@@ -69,7 +74,10 @@ class SecurityService {
         uri TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
         payload TEXT,
-        last_rolo_id TEXT
+        last_rolo_id TEXT,
+        updated_at TEXT,
+        FOREIGN KEY (last_rolo_id) REFERENCES tbl_rolos(rolo_id)
+          ON DELETE SET NULL
       )
     ''');
 
@@ -84,9 +92,14 @@ class SecurityService {
         subject_uri TEXT NOT NULL,
         attr_key TEXT NOT NULL,
         attr_value TEXT,
-        last_rolo_id TEXT NOT NULL,
+        last_rolo_id TEXT,
         is_encrypted INTEGER DEFAULT 0,
-        PRIMARY KEY (subject_uri, attr_key)
+        updated_at TEXT,
+        PRIMARY KEY (subject_uri, attr_key),
+        FOREIGN KEY (subject_uri) REFERENCES tbl_records(uri)
+          ON DELETE CASCADE,
+        FOREIGN KEY (last_rolo_id) REFERENCES tbl_rolos(rolo_id)
+          ON DELETE SET NULL
       )
     ''');
 

@@ -52,6 +52,7 @@ class AttributeModel extends Attribute {
       'attr_value': value,
       'last_rolo_id': lastRoloId,
       'is_encrypted': isEncrypted ? 1 : 0,
+      'updated_at': updatedAt?.toUtc().toIso8601String(),
     };
   }
 

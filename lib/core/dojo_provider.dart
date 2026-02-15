@@ -12,15 +12,20 @@ import 'services/security_service.dart';
 import 'services/dojo_service.dart';
 import 'services/librarian_service.dart';
 import 'services/backup_service.dart';
+import 'services/sensei_llm_service.dart';
+import 'services/synthesis_service.dart';
 
 /// Provides initialized Dojo services to the widget tree.
 ///
 /// All services are wired to the encrypted SQLCipher database
-/// through the repository layer.
+/// through the repository layer. The local LLM is initialized
+/// for on-device inference (Zero-Cloud policy).
 class DojoProvider extends InheritedWidget {
   final DojoService dojoService;
   final LibrarianService librarianService;
   final BackupService backupService;
+  final SenseiLlmService senseiLlm;
+  final SynthesisService synthesisService;
   final RoloRepository roloRepository;
   final RecordRepository recordRepository;
   final AttributeRepository attributeRepository;
@@ -29,6 +34,8 @@ class DojoProvider extends InheritedWidget {
     required this.dojoService,
     required this.librarianService,
     required this.backupService,
+    required this.senseiLlm,
+    required this.synthesisService,
     required this.roloRepository,
     required this.recordRepository,
     required this.attributeRepository,
@@ -46,7 +53,8 @@ class DojoProvider extends InheritedWidget {
   @override
   bool updateShouldNotify(DojoProvider oldWidget) => false;
 
-  /// Opens the encrypted database and creates all service instances.
+  /// Opens the encrypted database, initializes the local LLM,
+  /// and creates all service instances.
   static Future<DojoProvider> initialize({required Widget child}) async {
     final securityService = SecurityService();
     final dbPath = await getDatabasesPath();
@@ -59,10 +67,24 @@ class DojoProvider extends InheritedWidget {
     final recordRepo = RecordRepositoryImpl(dataSource);
     final attributeRepo = AttributeRepositoryImpl(dataSource);
 
+    // Initialize local LLM (Llama 3.2 via fllama)
+    final senseiLlm = LocalLlmService();
+    try {
+      // Model file path — in production, bundled as an asset or
+      // downloaded on first launch to the app's documents directory.
+      final modelDir = await getDatabasesPath();
+      final modelPath = path.join(modelDir, 'llama-3.2-3b-instruct.Q4_K_M.gguf');
+      await senseiLlm.initialize(modelPath: modelPath);
+    } catch (e) {
+      // LLM initialization is non-fatal; rule-based fallback is used.
+      debugPrint('[Sensei] LLM init skipped: $e');
+    }
+
     final dojoService = DojoService(
       roloRepository: roloRepo,
       recordRepository: recordRepo,
       attributeRepository: attributeRepo,
+      senseiLlm: senseiLlm,
     );
 
     final librarianService = LibrarianService(
@@ -75,12 +97,21 @@ class DojoProvider extends InheritedWidget {
       roloRepository: roloRepo,
       recordRepository: recordRepo,
       attributeRepository: attributeRepo,
+      securityService: securityService,
+    );
+
+    final synthesisService = SynthesisService(
+      roloRepository: roloRepo,
+      recordRepository: recordRepo,
+      attributeRepository: attributeRepo,
     );
 
     return DojoProvider(
       dojoService: dojoService,
       librarianService: librarianService,
       backupService: backupService,
+      senseiLlm: senseiLlm,
+      synthesisService: synthesisService,
       roloRepository: roloRepo,
       recordRepository: recordRepo,
       attributeRepository: attributeRepo,

@@ -96,6 +96,8 @@ class _RolodojoAppState extends State<RolodojoApp> {
           dojoService: provider.dojoService,
           librarianService: provider.librarianService,
           backupService: provider.backupService,
+          senseiLlm: provider.senseiLlm,
+          synthesisService: provider.synthesisService,
           roloRepository: provider.roloRepository,
           recordRepository: provider.recordRepository,
           attributeRepository: provider.attributeRepository,

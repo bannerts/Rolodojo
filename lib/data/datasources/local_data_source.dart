@@ -81,6 +81,16 @@ class LocalDataSource {
     return results.map((r) => RoloModel.fromMap(r)).toList();
   }
 
+  /// Updates an existing Rolo (Ghost optimization).
+  Future<void> updateRolo(RoloModel rolo) async {
+    await _db.update(
+      'tbl_rolos',
+      rolo.toMap(),
+      where: 'rolo_id = ?',
+      whereArgs: [rolo.id],
+    );
+  }
+
   /// Returns the total count of Rolos.
   Future<int> countRolos() async {
     final result = await _db.rawQuery('SELECT COUNT(*) as count FROM tbl_rolos');

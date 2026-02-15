@@ -58,6 +58,7 @@ class RecordModel extends Record {
       'display_name': displayName,
       'payload': jsonEncode(payload),
       'last_rolo_id': lastRoloId,
+      'updated_at': updatedAt?.toUtc().toIso8601String(),
     };
   }
 

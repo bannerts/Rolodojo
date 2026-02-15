@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../core/constants/dojo_theme.dart';
+import '../../core/dojo_provider.dart';
 import '../../core/services/backup_service.dart';
 import '../../core/services/biometric_service.dart';
+import '../../core/services/optimization_service.dart';
 
 /// The Dojo settings page.
 ///
@@ -408,9 +410,25 @@ class _SettingsPageState extends State<SettingsPage> {
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(context);
-              _showSnackBar('Optimization coming soon');
+              try {
+                final provider = DojoProvider.of(context);
+                final optimizationService = OptimizationService(
+                  roloRepository: provider.roloRepository,
+                );
+                final stats = await optimizationService.optimize();
+                if (mounted) {
+                  _showSnackBar(
+                    'Ghosted ${stats.ghostedCount} Rolos, '
+                    'saved ${stats.spaceSavedFormatted}',
+                  );
+                }
+              } catch (e) {
+                if (mounted) {
+                  _showSnackBar('Optimization failed: $e');
+                }
+              }
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: DojoColors.senseiGold,

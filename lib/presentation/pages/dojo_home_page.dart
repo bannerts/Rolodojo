@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../core/constants/dojo_theme.dart';
 import '../../core/dojo_provider.dart';
+import '../../core/services/synthesis_service.dart';
 import '../../domain/entities/attribute.dart';
 import '../../domain/entities/rolo.dart';
 import '../widgets/flip_card.dart';
@@ -24,6 +25,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
   List<Rolo> _recentRolos = [];
   bool _isLoading = true;
   String? _lastSynthesisMessage;
+  List<SynthesisSuggestion> _pendingSuggestions = [];
 
   @override
   void didChangeDependencies() {
@@ -62,6 +64,20 @@ class _DojoHomePageState extends State<DojoHomePage> {
         });
 
         await _loadRecentRolos();
+
+        // Check for synthesis suggestions from the new Rolo
+        final provider = DojoProvider.of(context);
+        final synthesisService = SynthesisService(
+          roloRepository: provider.roloRepository,
+          recordRepository: provider.recordRepository,
+          attributeRepository: provider.attributeRepository,
+        );
+        final suggestions = await synthesisService.analyzeRolo(result.rolo);
+        if (mounted && suggestions.isNotEmpty) {
+          setState(() {
+            _pendingSuggestions = suggestions;
+          });
+        }
 
         if (result.attribute != null) {
           Future.delayed(const Duration(seconds: 2), () {
@@ -166,6 +182,9 @@ class _DojoHomePageState extends State<DojoHomePage> {
                 ],
               ),
             ),
+          // Synthesis suggestion cards
+          if (_pendingSuggestions.isNotEmpty)
+            _buildSuggestionBanner(),
           Expanded(
             child: _isLoading
                 ? const Center(
@@ -182,6 +201,97 @@ class _DojoHomePageState extends State<DojoHomePage> {
         ],
       ),
     );
+  }
+
+  Widget _buildSuggestionBanner() {
+    return Container(
+      margin: const EdgeInsets.symmetric(
+        horizontal: DojoDimens.paddingMedium,
+        vertical: DojoDimens.paddingSmall,
+      ),
+      padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+      decoration: BoxDecoration(
+        color: DojoColors.senseiGold.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(DojoDimens.cardRadius),
+        border: Border.all(color: DojoColors.senseiGold.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.auto_awesome, color: DojoColors.senseiGold, size: 16),
+              SizedBox(width: 8),
+              Text(
+                'Sensei Suggestion',
+                style: TextStyle(
+                  color: DojoColors.senseiGold,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ..._pendingSuggestions.map((s) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${_formatKey(s.attributeKey)}: ${s.attributeValue}  '
+                        '(${(s.confidence * 100).toInt()}%)',
+                        style: const TextStyle(
+                          color: DojoColors.textPrimary,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.check_circle,
+                        color: DojoColors.success,
+                        size: 20,
+                      ),
+                      onPressed: () => _acceptSuggestion(s),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.cancel,
+                        color: DojoColors.alert,
+                        size: 20,
+                      ),
+                      onPressed: () => _dismissSuggestion(s),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                  ],
+                ),
+              )),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _acceptSuggestion(SynthesisSuggestion suggestion) async {
+    final dojo = DojoProvider.of(context).dojoService;
+    await dojo.processSummoning(
+      "Set ${suggestion.targetUri.split('.').last}'s "
+      '${suggestion.attributeKey} to ${suggestion.attributeValue}',
+    );
+    setState(() {
+      _pendingSuggestions.remove(suggestion);
+    });
+    await _loadRecentRolos();
+  }
+
+  void _dismissSuggestion(SynthesisSuggestion suggestion) {
+    setState(() {
+      _pendingSuggestions.remove(suggestion);
+    });
   }
 
   Widget _buildEmptyState() {
@@ -389,10 +499,20 @@ class _DojoHomePageState extends State<DojoHomePage> {
     final records = await provider.recordRepository.getAll();
 
     final recordAttributes = <String, List<Attribute>>{};
+    final roloTexts = <String, String>{};
     for (final record in records) {
       final attrs = await dojo.getAttributes(record.uri);
       if (attrs.isNotEmpty) {
         recordAttributes[record.uri] = attrs;
+        // Load the source Rolo's summoning text for each attribute
+        for (final attr in attrs) {
+          if (!roloTexts.containsKey(attr.lastRoloId)) {
+            final rolo = await dojo.getRolo(attr.lastRoloId);
+            if (rolo != null) {
+              roloTexts[attr.lastRoloId] = rolo.summoningText;
+            }
+          }
+        }
       }
     }
 
@@ -458,6 +578,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
                           uri: uri,
                           displayName: record.displayName,
                           attributes: attrs,
+                          roloTexts: roloTexts,
                         );
                       },
                     ),
@@ -582,11 +703,13 @@ class _VaultRecordCard extends StatelessWidget {
   final String uri;
   final String displayName;
   final List<Attribute> attributes;
+  final Map<String, String> roloTexts;
 
   const _VaultRecordCard({
     required this.uri,
     required this.displayName,
     required this.attributes,
+    this.roloTexts = const {},
   });
 
   @override
@@ -627,7 +750,7 @@ class _VaultRecordCard extends StatelessWidget {
                   attributeKey: attr.key,
                   attributeValue: attr.value,
                   roloId: attr.lastRoloId,
-                  summoningText: null,
+                  summoningText: roloTexts[attr.lastRoloId],
                   timestamp: attr.updatedAt ?? DateTime.now(),
                 )),
           ],
