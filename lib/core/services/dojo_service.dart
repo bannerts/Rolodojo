@@ -825,37 +825,52 @@ class DojoService {
       parsed: parsed,
       primaryUser: primaryUser,
     );
+    final journalBundle = await _buildJournalQueryContext(query);
+    final combinedContext = journalBundle.hasFacts
+        ? '${bundle.context}\n\nJournal context:\n${journalBundle.context}'
+        : bundle.context;
+    final combinedSources = _mergeSources(
+      bundle.sourcesUsed,
+      journalBundle.sourcesUsed,
+    );
+
+    if (bundle.directAnswer != null) {
+      return '${bundle.directAnswer}\n\n'
+          '${_buildSourcesUsedSection(combinedSources)}';
+    }
 
     if (_senseiLlm != null) {
       try {
         final llmAnswer = await _senseiLlm!.answerWithVault(
           question: query,
-          vaultContext: bundle.context,
+          vaultContext: combinedContext,
           userProfileSummary: _buildUserProfileSummary(primaryUser),
         );
         final normalized = llmAnswer.trim();
         if (normalized.isNotEmpty) {
-          return '$normalized\n\n${_buildSourcesUsedSection(bundle.sourcesUsed)}';
+          return '$normalized\n\n${_buildSourcesUsedSection(combinedSources)}';
         }
       } catch (e) {
         debugPrint('[DojoService] Query answer via LLM failed: $e');
       }
     }
 
-    if (bundle.directAnswer != null) {
-      return '${bundle.directAnswer}\n\n'
-          '${_buildSourcesUsedSection(bundle.sourcesUsed)}';
-    }
-
-    if (!bundle.hasFacts) {
+    if (!bundle.hasFacts && !journalBundle.hasFacts) {
       return 'I searched your vault but could not find enough related facts '
           'for that question yet.\n\n'
-          '${_buildSourcesUsedSection(bundle.sourcesUsed)}';
+          '${_buildSourcesUsedSection(combinedSources)}';
     }
 
+    final previewSections = <String>[
+      if (bundle.factsPreview.trim().isNotEmpty)
+        'Vault:\n${bundle.factsPreview.trim()}',
+      if (journalBundle.factsPreview.trim().isNotEmpty)
+        'Journal:\n${journalBundle.factsPreview.trim()}',
+    ];
     return 'I found related vault facts, but could not produce a complete '
-        'answer right now. Relevant entries:\n${bundle.factsPreview}\n\n'
-        '${_buildSourcesUsedSection(bundle.sourcesUsed)}';
+        'answer right now. Relevant entries:\n'
+        '${previewSections.join('\n\n')}\n\n'
+        '${_buildSourcesUsedSection(combinedSources)}';
   }
 
   Future<_VaultContextBundle> _buildVaultContextBundle({
@@ -1156,6 +1171,19 @@ class DojoService {
     return lines;
   }
 
+  List<String> _mergeSources(List<String> primary, List<String> secondary) {
+    final merged = <String>[];
+    final seen = <String>{};
+    for (final source in [...primary, ...secondary]) {
+      final normalized = source.trim();
+      if (normalized.isEmpty || !seen.add(normalized)) {
+        continue;
+      }
+      merged.add(normalized);
+    }
+    return merged;
+  }
+
   String _buildSourcesUsedSection(List<String> sources) {
     if (sources.isEmpty) {
       return 'Sources used:\n- none';
@@ -1171,6 +1199,82 @@ class DojoService {
       buffer.writeln('- ...and $remaining more');
     }
     return buffer.toString().trimRight();
+  }
+
+  Future<_JournalQueryContext> _buildJournalQueryContext(String query) async {
+    final entries = await getRecentJournalEntries(limit: 700);
+    if (entries.isEmpty) {
+      return const _JournalQueryContext();
+    }
+
+    final normalizedQuery = _normalizeQueryForVaultSearch(query);
+    final terms = _extractVaultSearchTerms(normalizedQuery)
+        .where((term) => term.trim().isNotEmpty)
+        .take(10)
+        .toList(growable: false);
+
+    final scored = <({JournalEntry entry, int score})>[];
+    for (final entry in entries) {
+      final content = entry.content.trim();
+      if (content.isEmpty) {
+        continue;
+      }
+      final lower = content.toLowerCase();
+      var score = 0;
+      for (final term in terms) {
+        if (term.isEmpty) continue;
+        if (lower.contains(term)) {
+          score += term.length;
+        }
+      }
+      if (score == 0 && terms.isNotEmpty) {
+        continue;
+      }
+      if (entry.role == JournalRole.user) {
+        score += 3;
+      }
+      if (entry.entryType == JournalEntryType.partial ||
+          entry.entryType == JournalEntryType.followUp) {
+        score += 1;
+      }
+      scored.add((entry: entry, score: score));
+    }
+
+    if (scored.isEmpty) {
+      return const _JournalQueryContext();
+    }
+
+    scored.sort((a, b) {
+      final byScore = b.score.compareTo(a.score);
+      if (byScore != 0) return byScore;
+      return b.entry.createdAt.compareTo(a.entry.createdAt);
+    });
+
+    final selected = scored.take(16).map((row) => row.entry).toList(growable: false)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    if (selected.isEmpty) {
+      return const _JournalQueryContext();
+    }
+
+    final contextLines = <String>[];
+    final factLines = <String>[];
+    final sources = <String>[];
+    for (final entry in selected) {
+      final role = entry.role == JournalRole.user ? 'user' : 'sensei';
+      final line = '- ${entry.journalDate} ${_formatRoloTime(entry.createdAt)} '
+          '[$role/${entry.entryType.value}]: '
+          '${_truncateForPrompt(entry.content, 140)}';
+      contextLines.add(line);
+      factLines.add(line);
+      sources.add('journal:${entry.journalDate}#${entry.id.substring(0, 8)}');
+    }
+
+    return _JournalQueryContext(
+      context: contextLines.join('\n'),
+      hasFacts: factLines.isNotEmpty,
+      factsPreview: factLines.take(4).join('\n'),
+      sourcesUsed: sources,
+    );
   }
 
   String _truncateForPrompt(String text, int maxLength) {
@@ -2452,5 +2556,19 @@ class _VaultContextBundle {
     required this.factsPreview,
     required this.sourcesUsed,
     this.directAnswer,
+  });
+}
+
+class _JournalQueryContext {
+  final String context;
+  final bool hasFacts;
+  final String factsPreview;
+  final List<String> sourcesUsed;
+
+  const _JournalQueryContext({
+    this.context = '',
+    this.hasFacts = false,
+    this.factsPreview = '',
+    this.sourcesUsed = const [],
   });
 }
