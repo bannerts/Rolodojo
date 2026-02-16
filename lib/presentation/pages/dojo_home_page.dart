@@ -641,6 +641,8 @@ class _DojoHomePageState extends State<DojoHomePage> {
         return 'entry';
       case JournalEntryType.followUp:
         return 'follow-up';
+      case JournalEntryType.answer:
+        return 'answer';
       case JournalEntryType.recall:
         return 'recall';
       case JournalEntryType.dailySummary:

@@ -21,6 +21,7 @@ enum JournalRole {
 enum JournalEntryType {
   partial('partial'),
   followUp('follow_up'),
+  answer('answer'),
   recall('recall'),
   dailySummary('daily_summary'),
   weeklySummary('weekly_summary');
@@ -53,7 +54,7 @@ class JournalEntry {
   /// Author of this row.
   final JournalRole role;
 
-  /// Row purpose (partial/follow-up/summary).
+  /// Row purpose (partial/follow-up/answer/summary).
   final JournalEntryType entryType;
 
   /// Entry text body.

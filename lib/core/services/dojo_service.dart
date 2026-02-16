@@ -523,7 +523,10 @@ class DojoService {
         ? <JournalEntry>[userEntry]
         : dayEntries;
 
-    final responseType = _resolveJournalResponseType(trimmed);
+    final responseType = _resolveJournalResponseType(
+      trimmed,
+      parsedAsQuery: vaultSummoning.parsed.isQuery,
+    );
     late final String responseText;
     if (responseType == JournalEntryType.dailySummary) {
       responseText = await _buildDailySummaryBlock(
@@ -539,6 +542,12 @@ class DojoService {
       );
     } else if (responseType == JournalEntryType.recall) {
       responseText = await _buildJournalRecallResponse(
+        trimmed,
+        sourceEntries,
+        primaryUser: primaryUser,
+      );
+    } else if (responseType == JournalEntryType.answer) {
+      responseText = await _buildJournalQuestionResponse(
         trimmed,
         sourceEntries,
         primaryUser: primaryUser,
@@ -1392,7 +1401,8 @@ class DojoService {
         score += 3;
       }
       if (entry.entryType == JournalEntryType.partial ||
-          entry.entryType == JournalEntryType.followUp) {
+          entry.entryType == JournalEntryType.followUp ||
+          entry.entryType == JournalEntryType.answer) {
         score += 1;
       }
       scored.add((entry: entry, score: score));
@@ -1531,7 +1541,10 @@ class DojoService {
     return '$month/$day $hour:$minute';
   }
 
-  JournalEntryType _resolveJournalResponseType(String input) {
+  JournalEntryType _resolveJournalResponseType(
+    String input, {
+    bool parsedAsQuery = false,
+  }) {
     if (_isJournalWeeklySummaryRequest(input)) {
       return JournalEntryType.weeklySummary;
     }
@@ -1540,6 +1553,9 @@ class DojoService {
     }
     if (_isJournalRecallRequest(input)) {
       return JournalEntryType.recall;
+    }
+    if (parsedAsQuery || _isJournalDirectQuestionRequest(input)) {
+      return JournalEntryType.answer;
     }
     return JournalEntryType.followUp;
   }
@@ -1600,6 +1616,50 @@ class DojoService {
       input: input,
       contextEntries: contextEntries,
       recentQuestions: recentQuestions,
+    );
+  }
+
+  Future<String> _buildJournalQuestionResponse(
+    String input,
+    List<JournalEntry> dayEntries, {
+    required UserProfile? primaryUser,
+  }) async {
+    final contextEntries = await _buildJournalFollowUpContextEntries(dayEntries);
+    final llmResponse = await _tryLlmJournalResponse(
+      prompt:
+          'User asked this in Journal Mode: "$input"\n'
+          'Provide a direct answer. If they ask for ideas or suggestions, '
+          'offer exactly 3 concrete options they can act on today.',
+      contextEntries: contextEntries,
+      primaryUser: primaryUser,
+      systemInstruction: _journalQuestionAnswerSystemInstruction,
+      maxTokens: 340,
+      temperature: 0.45,
+    );
+    final normalizedAnswer = _normalizeJournalAnswer(llmResponse);
+    if (normalizedAnswer != null) {
+      return normalizedAnswer;
+    }
+
+    final retryResponse = await _tryLlmJournalResponse(
+      prompt:
+          'Answer this Journal Mode question directly and concretely. '
+          'Do not ask a follow-up question.\n'
+          'Question: "$input"',
+      contextEntries: contextEntries,
+      primaryUser: primaryUser,
+      systemInstruction: _journalQuestionAnswerSystemInstruction,
+      maxTokens: 340,
+      temperature: 0.35,
+    );
+    final retryAnswer = _normalizeJournalAnswer(retryResponse);
+    if (retryAnswer != null) {
+      return retryAnswer;
+    }
+
+    return _buildJournalQuestionFallback(
+      input: input,
+      contextEntries: contextEntries,
     );
   }
 
@@ -2086,6 +2146,64 @@ class DojoService {
     return text.trim();
   }
 
+  String? _normalizeJournalAnswer(String? raw) {
+    final trimmed = raw?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      return null;
+    }
+    final compact = trimmed.replaceAll(RegExp(r'\s+'), ' ');
+    final isSingleQuestion = compact.endsWith('?') &&
+        !compact.contains('\n') &&
+        !compact.contains('.') &&
+        !compact.contains('!') &&
+        compact.split(' ').length <= 28;
+    if (isSingleQuestion) {
+      return null;
+    }
+    return trimmed;
+  }
+
+  String _buildJournalQuestionFallback({
+    required String input,
+    required List<JournalEntry> contextEntries,
+  }) {
+    final lower = input.toLowerCase();
+    if ((lower.contains('fun') || lower.contains('enjoy')) &&
+        (lower.contains('today') || lower.contains('do'))) {
+      final insights = _extractJournalInsights(contextEntries);
+      final ideas = <String>[
+        if (insights.people.isNotEmpty)
+          'Invite ${insights.people.first} to do one low-effort activity '
+              '(walk, coffee, or a short game) and capture one standout moment.',
+        if (insights.places.isNotEmpty)
+          'Revisit ${insights.places.first} with a mini challenge: '
+              'notice 3 details you missed before and journal them.',
+        'Run a 30-minute novelty block: pick a nearby spot, explore it, and '
+            'write one paragraph about what surprised you.',
+        'Do a quick energy reset (music + movement for 20 minutes), then log '
+            'how your mood changed.',
+        'Try a one-hour micro-adventure: pick a new cafe, park, or route and '
+            'capture one photo plus one reflection.',
+      ];
+      final selected = <String>[];
+      final seen = <String>{};
+      for (final idea in ideas) {
+        if (!seen.add(idea)) {
+          continue;
+        }
+        selected.add(idea);
+        if (selected.length >= 3) {
+          break;
+        }
+      }
+      return 'Here are three fun options for today:\n'
+          '${selected.map((idea) => '- $idea').join('\n')}';
+    }
+
+    return 'I could not get a reliable LLM response for that journal '
+        'question right now. Please try again in a moment.';
+  }
+
   bool _isQuestionRepetitive(String candidate, List<String> previousQuestions) {
     final candidateNormalized = _normalizeQuestionForComparison(candidate);
     if (candidateNormalized.isEmpty) {
@@ -2170,6 +2288,14 @@ class DojoService {
       '(specific event detail, emotional depth, reflection, meaning, '
       'relationships, body signals, gratitude, and next-step clarity). '
       'Ask only one question. Return the question text only.';
+
+  static const String _journalQuestionAnswerSystemInstruction =
+      'You are Sensei in Journal Mode answering a direct user question. '
+      'Provide a direct answer, not a follow-up question, unless the user '
+      'explicitly asks for a question. Use journal and profile context when '
+      'available. For idea or suggestion requests, provide 3 concrete options '
+      'the user can do today. Never return a generic mood/people/place '
+      'follow-up template. Keep the tone grounded, concise, and practical.';
 
   static const List<String> _journalWebInspiredQualityCriteria = <String>[
     'Capture concrete events (who, where, what happened), not only labels.',
@@ -2512,6 +2638,51 @@ class DojoService {
         lower.contains('how was my mood') ||
         lower.contains('recall') ||
         lower.contains('remind me');
+  }
+
+  bool _isJournalDirectQuestionRequest(String input) {
+    final trimmed = input.trim();
+    if (trimmed.isEmpty) {
+      return false;
+    }
+    if (_isJournalDailySummaryRequest(trimmed) ||
+        _isJournalWeeklySummaryRequest(trimmed) ||
+        _isJournalRecallRequest(trimmed)) {
+      return false;
+    }
+    if (trimmed.endsWith('?')) {
+      return true;
+    }
+
+    final lower = trimmed.toLowerCase();
+    const starters = <String>[
+      'what ',
+      'who ',
+      'where ',
+      'when ',
+      'why ',
+      'how ',
+      'can ',
+      'could ',
+      'would ',
+      'should ',
+      'is ',
+      'are ',
+      'do ',
+      'does ',
+      'did ',
+      'suggest ',
+      'recommend ',
+      'give me ',
+      'tell me ',
+      'help me ',
+    ];
+    for (final starter in starters) {
+      if (lower.startsWith(starter)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   String _journalDayKey(DateTime moment) {
