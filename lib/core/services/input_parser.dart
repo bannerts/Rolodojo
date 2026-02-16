@@ -185,6 +185,9 @@ class InputParser {
       final match = pattern.regex.firstMatch(trimmedInput);
       if (match != null) {
         final result = pattern.extractor(match);
+        if (_shouldDeferToLlm(result.subject, result.key, result.value)) {
+          continue;
+        }
         if (result.key == _relationshipKey && !_looksLikePersonName(result.subject)) {
           continue;
         }
@@ -322,6 +325,45 @@ class InputParser {
     }
     final token = tokens.first;
     return token.length >= 2 && RegExp(r'[A-Z]').hasMatch(token);
+  }
+
+  static bool _shouldDeferToLlm(
+    String subject,
+    String key,
+    String value,
+  ) {
+    final normalizedSubject = subject.trim().toLowerCase();
+    final normalizedKey = key.trim().toLowerCase();
+    final normalizedValue = value.trim().toLowerCase();
+
+    // Self-introduction lines are often multi-clause and best resolved by LLM
+    // with full context (owner profile + vault hints).
+    if (normalizedSubject == 'my' && normalizedKey == 'name') {
+      return true;
+    }
+
+    // Guard against over-captured address subjects like:
+    // "My Name is Scott Bannert and I live at ...".
+    if (normalizedKey == 'address') {
+      if (normalizedSubject.contains(' and i ') ||
+          normalizedSubject.contains(' my name is ') ||
+          normalizedSubject.contains(' i live ') ||
+          normalizedSubject.contains(' is ')) {
+        return true;
+      }
+    }
+
+    // Guard against name values swallowing an extra clause.
+    if (normalizedKey == 'name') {
+      if (normalizedValue.contains(' and i live ') ||
+          normalizedValue.contains(' and my ') ||
+          normalizedValue.contains(' my address ') ||
+          normalizedValue.contains(' lives at ')) {
+        return true;
+      }
+    }
+
+    return false;
   }
 }
 

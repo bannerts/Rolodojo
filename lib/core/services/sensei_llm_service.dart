@@ -1669,7 +1669,12 @@ Interaction style:
   static const _extractionSystemPrompt =
       '''Extract subject, attribute key/value, and query intent.
 If extraction is uncertain, lower confidence and keep fields null.
-If context already contains the exact same subject + key + value fact, set already_exists=true.''';
+If context already contains the exact same subject + key + value fact, set already_exists=true.
+Subject naming rules:
+- subject_name must be only the entity/person name, never a full clause.
+- Do not include connectors like "and", "is", "I live at", or sentence fragments in subject_name.
+- For self-introductions like "my name is X", subject_name should be "X".
+- If one sentence includes multiple facts, extract the single clearest fact and keep subject_name clean.''';
 
   static const _synthesisSystemPrompt =
       'Generate one concise, factual insight from provided ledger facts.';
@@ -1876,6 +1881,13 @@ Rules:
     LlmExtraction llmExtraction,
   ) {
     if (llmExtraction.canCreateAttribute &&
+        llmExtraction.confidence >= 0.45 &&
+        (_looksLikeOverCapturedName(fallback.subjectName) ||
+            _looksLikeOverCapturedValue(fallback.attributeValue) ||
+            _looksLikeSelfNameFallback(fallback))) {
+      return llmExtraction;
+    }
+    if (llmExtraction.canCreateAttribute &&
         llmExtraction.confidence >= fallback.confidence) {
       return llmExtraction;
     }
@@ -1885,6 +1897,42 @@ Rules:
       return llmExtraction;
     }
     return fallback;
+  }
+
+  bool _looksLikeSelfNameFallback(LlmExtraction extraction) {
+    final subject = (extraction.subjectName ?? '').trim().toLowerCase();
+    final key = (extraction.attributeKey ?? '').trim().toLowerCase();
+    final value = (extraction.attributeValue ?? '').trim().toLowerCase();
+    if (subject != 'my' || key != 'name') {
+      return false;
+    }
+    return value.contains(' and i ') ||
+        value.contains(' i live ') ||
+        value.contains(' lives at ') ||
+        value.contains(' my address ');
+  }
+
+  bool _looksLikeOverCapturedName(String? subjectName) {
+    final normalized = (subjectName ?? '').trim().toLowerCase();
+    if (normalized.isEmpty) {
+      return false;
+    }
+    return normalized.contains(' and i ') ||
+        normalized.contains(' i live ') ||
+        normalized.contains(' lives at ') ||
+        normalized.contains(' my name is ') ||
+        normalized.contains(' is my ');
+  }
+
+  bool _looksLikeOverCapturedValue(String? attributeValue) {
+    final normalized = (attributeValue ?? '').trim().toLowerCase();
+    if (normalized.isEmpty) {
+      return false;
+    }
+    return normalized.contains(' and i ') ||
+        normalized.contains(' and my ') ||
+        normalized.contains(' i live at ') ||
+        normalized.contains(' my name is ');
   }
 
   /// Enhanced rule-based extraction fallback.
