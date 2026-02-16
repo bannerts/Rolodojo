@@ -8,7 +8,7 @@ The Rolodojo is a privacy-first, local-encrypted "Digital Sensei" designed to ma
 - **Audit Everything:** No fact exists in the Dojo without a "Rolo" (a receipt/event) explaining where it came from.
 - **URI Driven:** All entities are addressed via dot-notation (e.g., `dojo.con.steve`, `dojo.ent.railroad_gate`).
 - **Local Sovereignty:** The user owns the keys. The Sensei is the servant.
-- **Zero-Cloud LLM:** All AI inference runs on-device via Llama 3.2 (llama.cpp FFI). No external API calls.
+- **Local-First LLM:** AI inference defaults to local Llama. Optional online providers are user-selectable with explicit API key configuration.
 
 ## 3. System Components
 - **The Sensei (Orchestrator):** `DojoService` — parses inputs via `InputParser` and optional local LLM (`SenseiLlmService`), creates Rolos, and updates the Vault.

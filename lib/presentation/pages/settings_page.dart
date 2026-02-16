@@ -33,7 +33,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _isExporting = false;
   bool _isImporting = false;
   bool _isCheckingLlm = false;
+  bool _isSwitchingLlmProvider = false;
   SenseiLlmService? _senseiLlm;
+  LlmProvider _selectedProvider = LlmProvider.localLlama;
   LlmHealthStatus _llmHealthStatus = const LlmHealthStatus();
 
   @override
@@ -64,6 +66,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _senseiLlm?.healthStatus.removeListener(_handleLlmHealthChanged);
     _senseiLlm = nextService;
     _senseiLlm!.healthStatus.addListener(_handleLlmHealthChanged);
+    _selectedProvider = _senseiLlm!.currentProvider;
     _llmHealthStatus = _senseiLlm!.healthStatus.value;
 
     if (_llmHealthStatus.checkedAt == null) {
@@ -75,6 +78,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final next = _senseiLlm?.healthStatus.value;
     if (!mounted || next == null) return;
     setState(() {
+      _selectedProvider = _senseiLlm?.currentProvider ?? _selectedProvider;
       _llmHealthStatus = next;
     });
   }
@@ -177,17 +181,32 @@ class _SettingsPageState extends State<SettingsPage> {
 
           const SizedBox(height: DojoDimens.paddingMedium),
 
-          // Local LLM Section
-          _buildSectionHeader('Local Llama'),
+          // LLM Provider Section
+          _buildSectionHeader('LLM Provider'),
           _buildSettingsCard([
+            _buildSettingsTile(
+              icon: Icons.hub_outlined,
+              title: 'Provider',
+              subtitle: _selectedProvider.label,
+              trailing: _isSwitchingLlmProvider
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: DojoColors.senseiGold,
+                      ),
+                    )
+                  : const Icon(Icons.chevron_right, color: DojoColors.textHint),
+              onTap: _isSwitchingLlmProvider ? null : _showLlmProviderPicker,
+            ),
+            const Divider(color: DojoColors.border, height: 1),
             _buildSettingsTile(
               icon: _llmHealthStatus.isHealthy
                   ? Icons.check_circle
                   : Icons.warning_amber_rounded,
-              title: 'Local LLM Server',
-              subtitle: _llmHealthStatus.checkedAt == null
-                  ? 'Checking local server health...'
-                  : _llmHealthStatus.message,
+              title: 'Connection Health',
+              subtitle: _providerHealthMessage(),
               trailing: _isCheckingLlm
                   ? const SizedBox(
                       width: 18,
@@ -217,6 +236,13 @@ class _SettingsPageState extends State<SettingsPage> {
                   ? 'Not configured'
                   : 'active: ${_senseiLlm!.activeModelName} / configured: '
                       '${_senseiLlm!.configuredModelName}',
+              trailing: null,
+            ),
+            const Divider(color: DojoColors.border, height: 1),
+            _buildSettingsTile(
+              icon: Icons.vpn_key_outlined,
+              title: 'Credentials',
+              subtitle: _providerCredentialStatus(),
               trailing: null,
             ),
           ]),
@@ -260,7 +286,7 @@ class _SettingsPageState extends State<SettingsPage> {
             _buildSettingsTile(
               icon: Icons.article_outlined,
               title: 'Privacy Policy',
-              subtitle: 'Zero-Cloud Default',
+              subtitle: 'Local-first with optional cloud LLMs',
               trailing:
                   const Icon(Icons.chevron_right, color: DojoColors.textHint),
               onTap: () => _showPrivacyInfo(),
@@ -451,6 +477,122 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  String _providerHealthMessage() {
+    if (_senseiLlm == null) {
+      return 'LLM service not configured';
+    }
+    if (_llmHealthStatus.checkedAt == null) {
+      return 'Checking ${_selectedProvider.label} health...';
+    }
+    if (_llmHealthStatus.provider != _selectedProvider) {
+      return 'Switching to ${_selectedProvider.label}...';
+    }
+    return _llmHealthStatus.message;
+  }
+
+  String _providerCredentialStatus() {
+    if (_selectedProvider.isLocal) {
+      return 'No API key required for local provider';
+    }
+    if (_llmHealthStatus.provider == _selectedProvider &&
+        _llmHealthStatus.apiKeyConfigured) {
+      return 'API key detected via ${_selectedProvider.apiKeyEnvVar}';
+    }
+    return 'Missing API key. Set ${_selectedProvider.apiKeyEnvVar}.';
+  }
+
+  void _showLlmProviderPicker() {
+    if (_senseiLlm == null) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: DojoColors.graphite,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(DojoDimens.cardRadius),
+        ),
+      ),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(
+                DojoDimens.paddingMedium,
+                DojoDimens.paddingMedium,
+                DojoDimens.paddingMedium,
+                DojoDimens.paddingSmall,
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.hub_outlined, color: DojoColors.senseiGold),
+                  SizedBox(width: 8),
+                  Text(
+                    'Select LLM Provider',
+                    style: TextStyle(
+                      color: DojoColors.textPrimary,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            ..._senseiLlm!.supportedProviders.map(
+              (provider) => ListTile(
+                leading: Icon(
+                  provider.isLocal ? Icons.memory_outlined : Icons.cloud_outlined,
+                  color: provider == _selectedProvider
+                      ? DojoColors.senseiGold
+                      : DojoColors.textHint,
+                ),
+                title: Text(
+                  provider.label,
+                  style: const TextStyle(color: DojoColors.textPrimary),
+                ),
+                subtitle: Text(
+                  provider.isLocal ? 'Local endpoint' : 'Online API',
+                  style: const TextStyle(color: DojoColors.textHint, fontSize: 12),
+                ),
+                trailing: provider == _selectedProvider
+                    ? const Icon(Icons.check_circle, color: DojoColors.success)
+                    : null,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _switchProvider(provider);
+                },
+              ),
+            ),
+            const SizedBox(height: DojoDimens.paddingSmall),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _switchProvider(LlmProvider provider) async {
+    if (_senseiLlm == null ||
+        _isSwitchingLlmProvider ||
+        provider == _selectedProvider) {
+      return;
+    }
+
+    setState(() {
+      _isSwitchingLlmProvider = true;
+      _selectedProvider = provider;
+    });
+
+    try {
+      await _senseiLlm!.selectProvider(provider);
+      await _senseiLlm!.checkHealth(force: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSwitchingLlmProvider = false;
+        });
+      }
+    }
+  }
+
   Future<void> _refreshLlmHealth() async {
     if (_isCheckingLlm || _senseiLlm == null) {
       return;
@@ -559,7 +701,7 @@ class _SettingsPageState extends State<SettingsPage> {
             Icon(Icons.shield_outlined, color: DojoColors.success),
             SizedBox(width: 8),
             Text(
-              'Zero-Cloud Policy',
+              'Privacy Modes',
               style: TextStyle(color: DojoColors.textPrimary),
             ),
           ],
@@ -569,14 +711,15 @@ class _SettingsPageState extends State<SettingsPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Your data never leaves your device unless you explicitly export it.',
+              'Local mode keeps all inference on-device. Online LLM modes are optional and send only request payloads to your selected provider.',
               style: TextStyle(color: DojoColors.textSecondary),
             ),
             SizedBox(height: 16),
             Text(
               '✓ Local SQLCipher encryption (AES-256)\n'
               '✓ Keys stored in Secure Storage\n'
-              '✓ No external API calls\n'
+              '✓ Local Llama by default\n'
+              '✓ Optional Claude/Grok/Gemini/ChatGPT provider routing\n'
               '✓ No analytics or telemetry\n'
               '✓ Open-source audit trail',
               style: TextStyle(color: DojoColors.success, fontSize: 13),

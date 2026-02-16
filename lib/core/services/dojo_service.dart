@@ -75,12 +75,40 @@ class DojoService {
     String input, {
     RoloMetadata metadata = RoloMetadata.empty,
   }) async {
-    // Parse the input — use local LLM if available, fall back to regex
+    // Parse the input — use active LLM provider if available, fall back to regex
     var parsed = _inputParser.parse(input);
 
     if (!parsed.canCreateAttribute && _senseiLlm != null && _senseiLlm!.isReady) {
       // LLM may extract structure that regex missed
-      final llmResult = await _senseiLlm!.parseInput(input);
+      final recentRolos = await _roloRepository.getRecent(limit: 5);
+      final recentTargetUris = recentRolos
+          .where((r) => r.targetUri != null)
+          .map((r) => r.targetUri!)
+          .toSet()
+          .take(5)
+          .toList(growable: false);
+
+      var hintAttributes = <String>[];
+      if (parsed.subjectUri != null) {
+        final knownAttributes =
+            await _attributeRepository.getByUri(parsed.subjectUri!.toString());
+        hintAttributes = knownAttributes
+            .map((a) => a.key)
+            .take(8)
+            .toList(growable: false);
+      }
+
+      final llmResult = await _senseiLlm!.parseInput(
+        input,
+        context: LlmParsingContext(
+          parserSubjectUriHint: parsed.subjectUri?.toString(),
+          recentSummonings: recentRolos
+              .map((r) => r.summoningText)
+              .toList(growable: false),
+          recentTargetUris: recentTargetUris,
+          hintAttributes: hintAttributes,
+        ),
+      );
       if (llmResult.canCreateAttribute && llmResult.confidence > parsed.confidence) {
         parsed = ParsedInput(
           subjectName: llmResult.subjectName,

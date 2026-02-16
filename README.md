@@ -31,6 +31,8 @@ This repository is optimized for AI-first development using **Claude Code** or *
 ## 🧭 Local-First Architecture
 - [`local_inference.md`](./local_inference.md): Local orchestrator rules for using the local Llama endpoint (`localhost`) with quantized fallback guidance.
 - [`ledger_structure.md`](./ledger_structure.md): URI ledger format and local write contract, including explicit local-only privacy boundaries.
+- Optional online provider mode is supported via Settings (`Claude`, `Grok`, `Gemini`, `ChatGPT`) when API keys are provided.
+- Runtime provider boot option: `--dart-define=LLM_PROVIDER=llama|claude|grok|gemini|chatgpt`
 
 ---
 

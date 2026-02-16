@@ -5,11 +5,11 @@ This document defines how the Sensei uses a **local Llama runtime** (Ollama-comp
 ## 1) Local-First Contract
 
 - Inference endpoint must be local by default.
-- No external AI API keys are required or used.
-- If the local Llama server is unavailable, the app must:
+- No external AI API keys are required in default local mode.
+- If the local Llama server is unavailable while local mode is selected, the app must:
   1. raise a visible UI warning,
   2. keep operating with rule-based fallback parsing,
-  3. never route requests to a cloud endpoint.
+  3. avoid cloud routing unless the user explicitly switches provider.
 
 ## 2) Endpoint Configuration
 
@@ -17,10 +17,19 @@ This document defines how the Sensei uses a **local Llama runtime** (Ollama-comp
 - Health check path: `GET /models`
 - Inference path: `POST /chat/completions`
 
+Optional online providers (when selected in Settings):
+
+- Claude: `https://api.anthropic.com/v1`
+- Grok: `https://api.x.ai/v1`
+- Gemini: `https://generativelanguage.googleapis.com/v1beta`
+- ChatGPT: `https://api.openai.com/v1`
+
 Runtime overrides:
 
 - `LLAMA_BASE_URL` (optional)
 - `LLAMA_MODEL` (optional)
+- `LLM_PROVIDER` (optional: `llama|claude|grok|gemini|chatgpt`)
+- `CLAUDE_API_KEY`, `GROK_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY` (optional, required only for online modes)
 
 Example:
 
@@ -61,7 +70,7 @@ Recommended sequence:
    - or another local Q4/Q5 profile available in Ollama
 3. If still unstable, use minimal local backup model:
    - `openchat-3.6` (or equivalent smaller local profile)
-4. Never escalate to remote inference.
+4. If local mode is required, continue fallback parsing instead of auto-switching to cloud.
 
 Operational rule:
 
@@ -84,9 +93,9 @@ UI behavior when unhealthy:
 
 ## 6) Privacy and Audit Constraints
 
-- Prompt/response payloads remain on the local device or local loopback network.
+- Prompt/response payloads remain local when local mode is active.
 - No telemetry forwarding of user content.
-- No model requests to non-local hosts unless explicitly reconfigured by the owner.
+- No model requests to non-local hosts unless explicitly selected by the owner.
 - All resulting ledger writes still flow through normal audit path (`last_rolo_id` linkage).
 
 ## 7) Implementation Notes (Current)

@@ -7,7 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../utils/uri_utils.dart';
 import 'input_parser.dart';
 
-/// Result of a local LLM inference call.
+/// Result of an LLM inference call.
 class LlmResult {
   /// The generated text response.
   final String text;
@@ -54,152 +54,278 @@ class LlmExtraction {
       subjectName != null && attributeKey != null && attributeValue != null;
 }
 
-/// Connection state for the local Llama server.
+/// Supported LLM providers.
+enum LlmProvider {
+  localLlama(
+    id: 'llama',
+    label: 'Local Llama',
+    isLocal: true,
+    apiKeyEnvVar: '',
+  ),
+  claude(
+    id: 'claude',
+    label: 'Claude',
+    isLocal: false,
+    apiKeyEnvVar: 'CLAUDE_API_KEY',
+  ),
+  grok(
+    id: 'grok',
+    label: 'Grok',
+    isLocal: false,
+    apiKeyEnvVar: 'GROK_API_KEY',
+  ),
+  gemini(
+    id: 'gemini',
+    label: 'Gemini',
+    isLocal: false,
+    apiKeyEnvVar: 'GEMINI_API_KEY',
+  ),
+  chatGpt(
+    id: 'chatgpt',
+    label: 'ChatGPT',
+    isLocal: false,
+    apiKeyEnvVar: 'OPENAI_API_KEY',
+  );
+
+  final String id;
+  final String label;
+  final bool isLocal;
+  final String apiKeyEnvVar;
+
+  const LlmProvider({
+    required this.id,
+    required this.label,
+    required this.isLocal,
+    required this.apiKeyEnvVar,
+  });
+
+  bool get requiresApiKey => !isLocal;
+
+  static LlmProvider fromId(String raw) {
+    final normalized = raw.toLowerCase().trim();
+    for (final provider in LlmProvider.values) {
+      if (provider.id == normalized ||
+          provider.label.toLowerCase() == normalized) {
+        return provider;
+      }
+    }
+    if (normalized == 'openai' || normalized == 'chatgpt') {
+      return LlmProvider.chatGpt;
+    }
+    if (normalized == 'llama' || normalized == 'local') {
+      return LlmProvider.localLlama;
+    }
+    return LlmProvider.localLlama;
+  }
+}
+
+/// Context fed to parsing requests so Sensei stays anchored to Dojo rules.
+class LlmParsingContext {
+  final String? parserSubjectUriHint;
+  final List<String> recentSummonings;
+  final List<String> recentTargetUris;
+  final List<String> hintAttributes;
+
+  const LlmParsingContext({
+    this.parserSubjectUriHint,
+    this.recentSummonings = const [],
+    this.recentTargetUris = const [],
+    this.hintAttributes = const [],
+  });
+
+  bool get hasAnyHints =>
+      (parserSubjectUriHint?.trim().isNotEmpty ?? false) ||
+      recentSummonings.isNotEmpty ||
+      recentTargetUris.isNotEmpty ||
+      hintAttributes.isNotEmpty;
+}
+
+/// Connection and readiness state for the active provider.
 class LlmHealthStatus {
-  /// Whether the local HTTP endpoint is reachable.
+  final LlmProvider provider;
   final bool serverReachable;
-
-  /// Whether the requested model is available on the server.
   final bool modelAvailable;
-
-  /// Configured OpenAI-compatible endpoint (e.g. http://localhost:11434/v1).
+  final bool apiKeyConfigured;
   final String endpoint;
-
-  /// The model requested by app configuration.
   final String configuredModel;
-
-  /// The model currently used for requests (may be a fallback).
   final String? activeModel;
-
-  /// Discovered model IDs from `/v1/models`.
   final List<String> availableModels;
-
-  /// Human-readable status message suitable for UI display.
   final String message;
-
-  /// Timestamp of the last health check.
   final DateTime? checkedAt;
 
   const LlmHealthStatus({
+    this.provider = LlmProvider.localLlama,
     this.serverReachable = false,
     this.modelAvailable = false,
+    this.apiKeyConfigured = true,
     this.endpoint = '',
     this.configuredModel = '',
     this.activeModel,
     this.availableModels = const [],
-    this.message = 'Local LLM health has not been checked yet.',
+    this.message = 'LLM health has not been checked yet.',
     this.checkedAt,
   });
 
-  /// True only when endpoint and model are both available.
-  bool get isHealthy => serverReachable && modelAvailable;
+  /// True when this provider can be used for inference.
+  bool get isHealthy =>
+      serverReachable &&
+      modelAvailable &&
+      (!provider.requiresApiKey || apiKeyConfigured);
 }
 
-/// Abstract interface for local LLM operations.
-///
-/// Per CLAUDE.md: "The Sensei agent must be implemented using a local
-/// LLM runner (e.g., Llama 3.2 via llama_flutter). External AI APIs
-/// are strictly forbidden to maintain the Zero-Cloud policy."
-///
-/// All inference runs against a local server endpoint (no cloud calls).
+/// Abstract interface for Sensei LLM operations.
 abstract class SenseiLlmService {
-  /// Whether the LLM model is loaded and ready.
   bool get isReady;
-
-  /// OpenAI-compatible base URL for the local server.
   String get baseUrl;
-
-  /// Preferred model name from app configuration.
   String get configuredModelName;
-
-  /// Active model name currently being used.
   String get activeModelName;
-
-  /// Live health status for UI subscriptions.
+  LlmProvider get currentProvider;
+  List<LlmProvider> get supportedProviders;
   ValueListenable<LlmHealthStatus> get healthStatus;
 
-  /// Initialize the local LLM service.
-  ///
-  /// [modelPath] - Compatibility marker for existing call sites.
-  /// [contextSize] - Token context window size.
-  /// [threads] - Number of CPU threads for inference.
   Future<void> initialize({
     required String modelPath,
     int contextSize = 2048,
     int threads = 4,
   });
 
-  /// Checks local endpoint and model availability.
+  Future<void> selectProvider(LlmProvider provider);
   Future<LlmHealthStatus> checkHealth({bool force = false});
 
-  /// Parse natural language input into structured data.
-  ///
-  /// Uses the LLM to extract subject, attribute key, and value
-  /// from free-form text with higher accuracy than regex alone.
-  Future<LlmExtraction> parseInput(String input);
+  Future<LlmExtraction> parseInput(
+    String input, {
+    LlmParsingContext context = const LlmParsingContext(),
+  });
 
-  /// Generate a synthesis insight from multiple facts.
-  ///
-  /// [facts] - List of key:value facts about a subject.
-  /// [recentRolos] - Recent summoning texts for context.
   Future<LlmResult> synthesize({
     required String subjectUri,
     required Map<String, String> facts,
     List<String> recentRolos = const [],
   });
 
-  /// Summarize a long text for Ghost record compression.
   Future<String> summarize(String text, {int maxLength = 50});
-
-  /// Release model resources.
   Future<void> dispose();
 }
 
-/// Uses an OpenAI-compatible local endpoint (e.g. Ollama's `/v1` API).
-/// Falls back to rule-based parsing when the server/model is unavailable.
+/// Multi-provider LLM client.
+///
+/// - Local Llama via OpenAI-compatible endpoint (Ollama/local server)
+/// - Claude (Anthropic)
+/// - Grok (xAI OpenAI-compatible)
+/// - Gemini (Google)
+/// - ChatGPT (OpenAI)
+///
+/// If the active provider is unhealthy, Sensei falls back to deterministic
+/// parser logic and keeps the Dojo functional.
 class LocalLlmService implements SenseiLlmService {
   LocalLlmService({
-    String baseUrl = 'http://localhost:11434/v1',
-    String modelName = 'llama3.3',
-    List<String> fallbackModels = const ['openchat-3.6'],
-    Duration requestTimeout = const Duration(seconds: 12),
+    LlmProvider initialProvider = LlmProvider.localLlama,
+    String localBaseUrl = 'http://localhost:11434/v1',
+    String localModel = 'llama3.3',
+    List<String> localFallbackModels = const ['openchat-3.6'],
+    String claudeBaseUrl = 'https://api.anthropic.com/v1',
+    String claudeModel = 'claude-3-5-sonnet-latest',
+    String claudeApiKey = '',
+    String grokBaseUrl = 'https://api.x.ai/v1',
+    String grokModel = 'grok-2-latest',
+    String grokApiKey = '',
+    String geminiBaseUrl = 'https://generativelanguage.googleapis.com/v1beta',
+    String geminiModel = 'gemini-1.5-flash',
+    String geminiApiKey = '',
+    String chatGptBaseUrl = 'https://api.openai.com/v1',
+    String chatGptModel = 'gpt-4o-mini',
+    String chatGptApiKey = '',
+    Duration requestTimeout = const Duration(seconds: 15),
     Duration healthPollInterval = const Duration(seconds: 30),
-  })  : _baseUri = _normalizeBaseUri(baseUrl),
-        _configuredModelName = modelName.trim().isEmpty ? 'llama3.3' : modelName.trim(),
-        _fallbackModels = fallbackModels
-            .map((m) => m.trim())
-            .where((m) => m.isNotEmpty)
-            .toList(growable: false),
+  })  : _currentProvider = initialProvider,
         _requestTimeout = requestTimeout,
         _healthPollInterval = healthPollInterval {
     _httpClient.connectionTimeout = requestTimeout;
+    _providerConfigs = <LlmProvider, _ProviderConfig>{
+      LlmProvider.localLlama: _ProviderConfig(
+        baseUri: _normalizeOpenAiBaseUri(localBaseUrl, defaultBase: 'http://localhost:11434/v1'),
+        configuredModel: _trimOrDefault(localModel, 'llama3.3'),
+        apiKey: '',
+        fallbackModels: localFallbackModels
+            .map((m) => m.trim())
+            .where((m) => m.isNotEmpty)
+            .toList(growable: false),
+      ),
+      LlmProvider.claude: _ProviderConfig(
+        baseUri: _normalizeRequiredSuffix(
+          claudeBaseUrl,
+          defaultBase: 'https://api.anthropic.com/v1',
+          requiredSuffix: '/v1',
+        ),
+        configuredModel: _trimOrDefault(claudeModel, 'claude-3-5-sonnet-latest'),
+        apiKey: claudeApiKey.trim(),
+      ),
+      LlmProvider.grok: _ProviderConfig(
+        baseUri: _normalizeOpenAiBaseUri(
+          grokBaseUrl,
+          defaultBase: 'https://api.x.ai/v1',
+        ),
+        configuredModel: _trimOrDefault(grokModel, 'grok-2-latest'),
+        apiKey: grokApiKey.trim(),
+      ),
+      LlmProvider.gemini: _ProviderConfig(
+        baseUri: _normalizeRequiredSuffix(
+          geminiBaseUrl,
+          defaultBase: 'https://generativelanguage.googleapis.com/v1beta',
+          requiredSuffix: '/v1beta',
+        ),
+        configuredModel: _trimOrDefault(geminiModel, 'gemini-1.5-flash'),
+        apiKey: geminiApiKey.trim(),
+      ),
+      LlmProvider.chatGpt: _ProviderConfig(
+        baseUri: _normalizeOpenAiBaseUri(
+          chatGptBaseUrl,
+          defaultBase: 'https://api.openai.com/v1',
+        ),
+        configuredModel: _trimOrDefault(chatGptModel, 'gpt-4o-mini'),
+        apiKey: chatGptApiKey.trim(),
+      ),
+    };
+  }
+
+  static String _trimOrDefault(String raw, String fallback) {
+    final trimmed = raw.trim();
+    return trimmed.isEmpty ? fallback : trimmed;
   }
 
   bool _isReady = false;
-  String? _activeModelName;
-  DateTime? _lastHealthCheck;
-  Timer? _healthPoller;
-
-  final Uri _baseUri;
-  final String _configuredModelName;
-  final List<String> _fallbackModels;
   final Duration _requestTimeout;
   final Duration _healthPollInterval;
   final HttpClient _httpClient = HttpClient();
   final ValueNotifier<LlmHealthStatus> _healthStatusNotifier =
       ValueNotifier(const LlmHealthStatus());
+  late final Map<LlmProvider, _ProviderConfig> _providerConfigs;
+  final Map<LlmProvider, String> _activeModels = <LlmProvider, String>{};
+  LlmProvider _currentProvider;
+  DateTime? _lastHealthCheck;
+  LlmProvider? _lastHealthProvider;
+  Timer? _healthPoller;
+
+  _ProviderConfig get _activeConfig => _providerConfigs[_currentProvider]!;
 
   @override
   bool get isReady => _isReady;
 
   @override
-  String get baseUrl => _baseUri.toString();
+  String get baseUrl => _activeConfig.baseUri.toString();
 
   @override
-  String get configuredModelName => _configuredModelName;
+  String get configuredModelName => _activeConfig.configuredModel;
 
   @override
-  String get activeModelName => _activeModelName ?? _configuredModelName;
+  String get activeModelName =>
+      _activeModels[_currentProvider] ?? _activeConfig.configuredModel;
+
+  @override
+  LlmProvider get currentProvider => _currentProvider;
+
+  @override
+  List<LlmProvider> get supportedProviders => LlmProvider.values;
 
   @override
   ValueListenable<LlmHealthStatus> get healthStatus => _healthStatusNotifier;
@@ -210,13 +336,25 @@ class LocalLlmService implements SenseiLlmService {
     int contextSize = 2048,
     int threads = 4,
   }) async {
-    // modelPath/context/thread values are retained for interface compatibility.
     debugPrint(
-      '[Sensei LLM] Initializing local endpoint=$baseUrl '
-      'configuredModel=$_configuredModelName marker=$modelPath',
+      '[Sensei LLM] Initializing provider=${_currentProvider.label} '
+      'endpoint=$baseUrl configuredModel=$configuredModelName marker=$modelPath',
     );
     await checkHealth(force: true);
     _startHealthMonitor();
+  }
+
+  @override
+  Future<void> selectProvider(LlmProvider provider) async {
+    if (_currentProvider == provider) {
+      return;
+    }
+
+    _currentProvider = provider;
+    _lastHealthCheck = null;
+    _lastHealthProvider = null;
+    debugPrint('[Sensei LLM] Provider switched to ${provider.label}');
+    await checkHealth(force: true);
   }
 
   @override
@@ -224,61 +362,227 @@ class LocalLlmService implements SenseiLlmService {
     final now = DateTime.now();
     if (!force &&
         _lastHealthCheck != null &&
+        _lastHealthProvider == _currentProvider &&
         now.difference(_lastHealthCheck!) < const Duration(seconds: 5)) {
       return _healthStatusNotifier.value;
     }
     _lastHealthCheck = now;
+    _lastHealthProvider = _currentProvider;
 
     try {
-      final response = await _getJson(_endpoint('models'));
-      final availableModels = _parseModelIds(response);
-      final resolvedModel = _resolveModelName(availableModels);
-      final modelAvailable = resolvedModel != null;
-      _activeModelName = resolvedModel;
-      _isReady = modelAvailable;
-
-      final status = LlmHealthStatus(
-        serverReachable: true,
-        modelAvailable: modelAvailable,
-        endpoint: baseUrl,
-        configuredModel: _configuredModelName,
-        activeModel: resolvedModel,
-        availableModels: availableModels,
-        message: _buildHealthMessage(
-          modelAvailable: modelAvailable,
-          resolvedModel: resolvedModel,
-          availableModels: availableModels,
-        ),
-        checkedAt: now,
-      );
-
+      final status = await _checkHealthForProvider(now);
+      _isReady = status.isHealthy;
       _healthStatusNotifier.value = status;
       return status;
     } catch (e) {
-      _isReady = false;
       final status = LlmHealthStatus(
+        provider: _currentProvider,
         serverReachable: false,
         modelAvailable: false,
+        apiKeyConfigured: !_currentProvider.requiresApiKey || _activeConfig.hasApiKey,
         endpoint: baseUrl,
-        configuredModel: _configuredModelName,
-        activeModel: null,
+        configuredModel: configuredModelName,
+        activeModel: _activeModels[_currentProvider],
         availableModels: const [],
-        message:
-            'Local Llama server is offline at $baseUrl. Start it and retry.',
+        message: '${_currentProvider.label} health check failed: $e',
         checkedAt: now,
       );
+      _isReady = false;
       _healthStatusNotifier.value = status;
       debugPrint('[Sensei LLM] Health check failed: $e');
       return status;
     }
   }
 
+  Future<LlmHealthStatus> _checkHealthForProvider(DateTime now) {
+    switch (_currentProvider) {
+      case LlmProvider.localLlama:
+        return _checkOpenAiCompatibleHealth(
+          now: now,
+          provider: _currentProvider,
+          allowMissingApiKey: true,
+          allowConfiguredModelWhenListEmpty: false,
+          fallbackModels: _activeConfig.fallbackModels,
+        );
+      case LlmProvider.grok:
+      case LlmProvider.chatGpt:
+        return _checkOpenAiCompatibleHealth(
+          now: now,
+          provider: _currentProvider,
+          allowMissingApiKey: false,
+          allowConfiguredModelWhenListEmpty: true,
+        );
+      case LlmProvider.claude:
+        return _checkClaudeHealth(now);
+      case LlmProvider.gemini:
+        return _checkGeminiHealth(now);
+    }
+  }
+
+  Future<LlmHealthStatus> _checkOpenAiCompatibleHealth({
+    required DateTime now,
+    required LlmProvider provider,
+    required bool allowMissingApiKey,
+    required bool allowConfiguredModelWhenListEmpty,
+    List<String> fallbackModels = const [],
+  }) async {
+    final config = _providerConfigs[provider]!;
+    if (!allowMissingApiKey && !config.hasApiKey) {
+      return _missingApiKeyStatus(now, provider, config);
+    }
+
+    final headers = config.hasApiKey ? _bearerHeaders(config.apiKey) : const <String, String>{};
+    final response = await _getJson(
+      _openAiEndpoint(config.baseUri, 'models'),
+      headers: headers,
+    );
+    final availableModels = _parseOpenAiModelIds(response);
+    final resolvedModel = _resolveModelName(
+      configuredModel: config.configuredModel,
+      availableModels: availableModels,
+      fallbackModels: fallbackModels,
+      allowConfiguredModelWhenListEmpty: allowConfiguredModelWhenListEmpty,
+    );
+    final modelAvailable = resolvedModel != null;
+    if (resolvedModel != null) {
+      _activeModels[provider] = resolvedModel;
+    } else {
+      _activeModels.remove(provider);
+    }
+
+    return LlmHealthStatus(
+      provider: provider,
+      serverReachable: true,
+      modelAvailable: modelAvailable,
+      apiKeyConfigured: !provider.requiresApiKey || config.hasApiKey,
+      endpoint: config.baseUri.toString(),
+      configuredModel: config.configuredModel,
+      activeModel: resolvedModel,
+      availableModels: availableModels,
+      message: _buildModelHealthMessage(
+        provider: provider,
+        endpoint: config.baseUri.toString(),
+        configuredModel: config.configuredModel,
+        resolvedModel: resolvedModel,
+        availableModels: availableModels,
+      ),
+      checkedAt: now,
+    );
+  }
+
+  Future<LlmHealthStatus> _checkClaudeHealth(DateTime now) async {
+    final config = _activeConfig;
+    if (!config.hasApiKey) {
+      return _missingApiKeyStatus(now, LlmProvider.claude, config);
+    }
+
+    final response = await _getJson(
+      _endpoint(config.baseUri, 'models'),
+      headers: _claudeHeaders(config.apiKey),
+    );
+    final availableModels = _parseOpenAiModelIds(response);
+    final resolvedModel = _resolveModelName(
+      configuredModel: config.configuredModel,
+      availableModels: availableModels,
+      fallbackModels: const [],
+      allowConfiguredModelWhenListEmpty: true,
+    );
+    if (resolvedModel != null) {
+      _activeModels[LlmProvider.claude] = resolvedModel;
+    } else {
+      _activeModels.remove(LlmProvider.claude);
+    }
+
+    return LlmHealthStatus(
+      provider: LlmProvider.claude,
+      serverReachable: true,
+      modelAvailable: resolvedModel != null,
+      apiKeyConfigured: true,
+      endpoint: config.baseUri.toString(),
+      configuredModel: config.configuredModel,
+      activeModel: resolvedModel,
+      availableModels: availableModels,
+      message: _buildModelHealthMessage(
+        provider: LlmProvider.claude,
+        endpoint: config.baseUri.toString(),
+        configuredModel: config.configuredModel,
+        resolvedModel: resolvedModel,
+        availableModels: availableModels,
+      ),
+      checkedAt: now,
+    );
+  }
+
+  Future<LlmHealthStatus> _checkGeminiHealth(DateTime now) async {
+    final config = _activeConfig;
+    if (!config.hasApiKey) {
+      return _missingApiKeyStatus(now, LlmProvider.gemini, config);
+    }
+
+    final response = await _getJson(_geminiModelsEndpoint(config.baseUri, config.apiKey));
+    final availableModels = _parseGeminiModelIds(response);
+    final resolvedModel = _resolveModelName(
+      configuredModel: config.configuredModel,
+      availableModels: availableModels,
+      fallbackModels: const [],
+      allowConfiguredModelWhenListEmpty: true,
+    );
+    if (resolvedModel != null) {
+      _activeModels[LlmProvider.gemini] = resolvedModel;
+    } else {
+      _activeModels.remove(LlmProvider.gemini);
+    }
+
+    return LlmHealthStatus(
+      provider: LlmProvider.gemini,
+      serverReachable: true,
+      modelAvailable: resolvedModel != null,
+      apiKeyConfigured: true,
+      endpoint: config.baseUri.toString(),
+      configuredModel: config.configuredModel,
+      activeModel: resolvedModel,
+      availableModels: availableModels,
+      message: _buildModelHealthMessage(
+        provider: LlmProvider.gemini,
+        endpoint: config.baseUri.toString(),
+        configuredModel: config.configuredModel,
+        resolvedModel: resolvedModel,
+        availableModels: availableModels,
+      ),
+      checkedAt: now,
+    );
+  }
+
+  LlmHealthStatus _missingApiKeyStatus(
+    DateTime now,
+    LlmProvider provider,
+    _ProviderConfig config,
+  ) {
+    return LlmHealthStatus(
+      provider: provider,
+      serverReachable: false,
+      modelAvailable: false,
+      apiKeyConfigured: false,
+      endpoint: config.baseUri.toString(),
+      configuredModel: config.configuredModel,
+      activeModel: null,
+      availableModels: const [],
+      message:
+          '${provider.label} is selected but API key is missing. Set ${provider.apiKeyEnvVar}.',
+      checkedAt: now,
+    );
+  }
+
   @override
-  Future<LlmExtraction> parseInput(String input) async {
+  Future<LlmExtraction> parseInput(
+    String input, {
+    LlmParsingContext context = const LlmParsingContext(),
+  }) async {
     final fallback = _ruleBasedExtraction(input);
     if (input.trim().isEmpty) {
       return fallback;
     }
+
     final health = await checkHealth();
     if (!health.isHealthy) {
       return fallback;
@@ -286,9 +590,9 @@ class LocalLlmService implements SenseiLlmService {
 
     final stopwatch = Stopwatch()..start();
     try {
-      final responseText = await _createChatCompletion(
-        systemPrompt: _systemPrompt,
-        userPrompt: _buildExtractionPrompt(input),
+      final responseText = await _createCompletion(
+        systemPrompt: '$_senseiCorePrompt\n$_extractionSystemPrompt',
+        userPrompt: _buildExtractionPrompt(input, context),
         maxTokens: 180,
         temperature: 0.1,
       );
@@ -300,8 +604,8 @@ class LocalLlmService implements SenseiLlmService {
     } finally {
       stopwatch.stop();
       debugPrint(
-        '[Sensei LLM] Parse took ${stopwatch.elapsedMilliseconds}ms '
-        '(ready=$_isReady model=$activeModelName)',
+        '[Sensei LLM] Parse (${_currentProvider.label}) took '
+        '${stopwatch.elapsedMilliseconds}ms',
       );
     }
   }
@@ -318,16 +622,15 @@ class LocalLlmService implements SenseiLlmService {
     }
 
     final stopwatch = Stopwatch()..start();
-
     try {
-      final llmText = await _createChatCompletion(
-        systemPrompt: _synthesisSystemPrompt,
+      final llmText = await _createCompletion(
+        systemPrompt: '$_senseiCorePrompt\n$_synthesisSystemPrompt',
         userPrompt: _buildSynthesisPrompt(subjectUri, facts, recentRolos),
         maxTokens: 180,
         temperature: 0.3,
       );
-      stopwatch.stop();
       final normalized = llmText.trim();
+      stopwatch.stop();
       if (normalized.isEmpty) {
         final fallback = _ruleBasedSynthesis(subjectUri, facts, recentRolos);
         return LlmResult(
@@ -343,8 +646,8 @@ class LocalLlmService implements SenseiLlmService {
       );
     } catch (e) {
       await _onRequestFailure(e);
-      final fallback = _ruleBasedSynthesis(subjectUri, facts, recentRolos);
       stopwatch.stop();
+      final fallback = _ruleBasedSynthesis(subjectUri, facts, recentRolos);
       return LlmResult(
         text: fallback,
         confidence: 0.65,
@@ -356,9 +659,7 @@ class LocalLlmService implements SenseiLlmService {
   @override
   Future<String> summarize(String text, {int maxLength = 50}) async {
     if (text.length <= maxLength) {
-      return text.length <= maxLength
-          ? text
-          : '${text.substring(0, maxLength - 3)}...';
+      return text;
     }
 
     final health = await checkHealth();
@@ -367,10 +668,9 @@ class LocalLlmService implements SenseiLlmService {
     }
 
     try {
-      final summary = await _createChatCompletion(
-        systemPrompt: _summarySystemPrompt,
-        userPrompt:
-            'Summarize this in at most $maxLength characters:\n\n$text',
+      final summary = await _createCompletion(
+        systemPrompt: '$_senseiCorePrompt\n$_summarySystemPrompt',
+        userPrompt: 'Summarize this in at most $maxLength characters:\n\n$text',
         maxTokens: 80,
         temperature: 0.2,
       );
@@ -394,43 +694,55 @@ class LocalLlmService implements SenseiLlmService {
     _httpClient.close(force: true);
     _isReady = false;
     _healthStatusNotifier.dispose();
-    debugPrint('[Sensei LLM] Local client disposed');
+    debugPrint('[Sensei LLM] Client disposed');
   }
 
-  /// Builds the extraction prompt for the LLM.
-  String _buildExtractionPrompt(String input) {
-    return '''Extract structured data from this input.
-Return ONLY valid JSON with keys:
-- subject_name (string or null)
-- attribute_key (snake_case string or null)
-- attribute_value (string or null)
-- is_query (boolean)
-- confidence (number 0..1)
-
-Input: "$input"''';
-  }
-
-  /// System prompt for the Sensei LLM.
-  static const _systemPrompt = '''You are the Sensei, a privacy-first AI that extracts structured data from natural language.
-You identify: subject names, attribute keys (in snake_case), and attribute values.
-You also identify queries (questions about data).
-Always respond with valid JSON only. Never make up data that isn't in the input.''';
-
-  static const _synthesisSystemPrompt =
-      'You are a local assistant generating concise relationship insights '
-      'from structured personal-ledger facts.';
-
-  static const _summarySystemPrompt =
-      'You produce short summaries without adding any extra details.';
-
-  Future<String> _createChatCompletion({
+  Future<String> _createCompletion({
     required String systemPrompt,
     required String userPrompt,
     required int maxTokens,
-    double temperature = 0.1,
+    required double temperature,
+  }) {
+    switch (_currentProvider) {
+      case LlmProvider.localLlama:
+      case LlmProvider.grok:
+      case LlmProvider.chatGpt:
+        return _createOpenAiCompatibleCompletion(
+          config: _activeConfig,
+          systemPrompt: systemPrompt,
+          userPrompt: userPrompt,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
+      case LlmProvider.claude:
+        return _createClaudeCompletion(
+          config: _activeConfig,
+          systemPrompt: systemPrompt,
+          userPrompt: userPrompt,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
+      case LlmProvider.gemini:
+        return _createGeminiCompletion(
+          config: _activeConfig,
+          systemPrompt: systemPrompt,
+          userPrompt: userPrompt,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
+    }
+  }
+
+  Future<String> _createOpenAiCompatibleCompletion({
+    required _ProviderConfig config,
+    required String systemPrompt,
+    required String userPrompt,
+    required int maxTokens,
+    required double temperature,
   }) async {
+    final headers = config.hasApiKey ? _bearerHeaders(config.apiKey) : const <String, String>{};
     final response = await _postJson(
-      _endpoint('chat/completions'),
+      _openAiEndpoint(config.baseUri, 'chat/completions'),
       <String, dynamic>{
         'model': activeModelName,
         'messages': [
@@ -441,35 +753,159 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
         'max_tokens': maxTokens,
         'stream': false,
       },
+      headers: headers,
     );
-
-    final choices = response['choices'];
-    if (choices is! List || choices.isEmpty) {
-      throw const FormatException('No completion choices returned.');
-    }
-    final firstChoice = choices.first;
-    if (firstChoice is! Map<String, dynamic>) {
-      throw const FormatException('Invalid completion choice format.');
-    }
-    final message = firstChoice['message'];
-    if (message is! Map<String, dynamic>) {
-      throw const FormatException('Missing completion message.');
-    }
-    final content = _extractMessageContent(message['content']);
+    final content = _parseOpenAiCompletion(response);
     if (content.isEmpty) {
       throw const FormatException('Empty completion content.');
     }
     return content;
   }
 
-  Future<Map<String, dynamic>> _getJson(Uri uri) async {
+  Future<String> _createClaudeCompletion({
+    required _ProviderConfig config,
+    required String systemPrompt,
+    required String userPrompt,
+    required int maxTokens,
+    required double temperature,
+  }) async {
+    final response = await _postJson(
+      _endpoint(config.baseUri, 'messages'),
+      <String, dynamic>{
+        'model': activeModelName,
+        'max_tokens': maxTokens,
+        'temperature': temperature,
+        'system': systemPrompt,
+        'messages': [
+          {'role': 'user', 'content': userPrompt},
+        ],
+      },
+      headers: _claudeHeaders(config.apiKey),
+    );
+    final content = _parseClaudeCompletion(response);
+    if (content.isEmpty) {
+      throw const FormatException('Empty Claude completion content.');
+    }
+    return content;
+  }
+
+  Future<String> _createGeminiCompletion({
+    required _ProviderConfig config,
+    required String systemPrompt,
+    required String userPrompt,
+    required int maxTokens,
+    required double temperature,
+  }) async {
+    final response = await _postJson(
+      _geminiGenerateEndpoint(config.baseUri, activeModelName, config.apiKey),
+      <String, dynamic>{
+        'systemInstruction': {
+          'parts': [
+            {'text': systemPrompt},
+          ],
+        },
+        'contents': [
+          {
+            'role': 'user',
+            'parts': [
+              {'text': userPrompt},
+            ],
+          },
+        ],
+        'generationConfig': {
+          'temperature': temperature,
+          'maxOutputTokens': maxTokens,
+        },
+      },
+    );
+    final content = _parseGeminiCompletion(response);
+    if (content.isEmpty) {
+      throw const FormatException('Empty Gemini completion content.');
+    }
+    return content;
+  }
+
+  String _parseOpenAiCompletion(Map<String, dynamic> response) {
+    final choices = response['choices'];
+    if (choices is! List || choices.isEmpty) {
+      return '';
+    }
+    final firstChoice = choices.first;
+    if (firstChoice is! Map<String, dynamic>) {
+      return '';
+    }
+    final message = firstChoice['message'];
+    if (message is! Map<String, dynamic>) {
+      return '';
+    }
+    return _extractMessageContent(message['content']);
+  }
+
+  String _parseClaudeCompletion(Map<String, dynamic> response) {
+    final content = response['content'];
+    if (content is! List) {
+      return '';
+    }
+    final parts = <String>[];
+    for (final part in content) {
+      if (part is Map<String, dynamic>) {
+        final type = part['type']?.toString() ?? '';
+        if (type == 'text') {
+          final text = part['text']?.toString() ?? '';
+          if (text.isNotEmpty) {
+            parts.add(text);
+          }
+        }
+      }
+    }
+    return parts.join('\n').trim();
+  }
+
+  String _parseGeminiCompletion(Map<String, dynamic> response) {
+    final candidates = response['candidates'];
+    if (candidates is! List || candidates.isEmpty) {
+      return '';
+    }
+    final first = candidates.first;
+    if (first is! Map<String, dynamic>) {
+      return '';
+    }
+    final content = first['content'];
+    if (content is! Map<String, dynamic>) {
+      return '';
+    }
+    final parts = content['parts'];
+    if (parts is! List || parts.isEmpty) {
+      return '';
+    }
+    final buffer = StringBuffer();
+    for (final part in parts) {
+      if (part is Map<String, dynamic>) {
+        final text = part['text']?.toString() ?? '';
+        if (text.isNotEmpty) {
+          if (buffer.isNotEmpty) {
+            buffer.writeln();
+          }
+          buffer.write(text);
+        }
+      }
+    }
+    return buffer.toString().trim();
+  }
+
+  Future<Map<String, dynamic>> _getJson(
+    Uri uri, {
+    Map<String, String> headers = const <String, String>{},
+  }) async {
     final request = await _httpClient.getUrl(uri).timeout(_requestTimeout);
     request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    headers.forEach(request.headers.set);
+
     final response = await request.close().timeout(_requestTimeout);
     final body = await utf8.decoder.bind(response).join();
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpException(
-        'GET ${uri.path} failed (${response.statusCode}): $body',
+        'GET ${uri.toString()} failed (${response.statusCode}): $body',
         uri: uri,
       );
     }
@@ -482,18 +918,20 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
 
   Future<Map<String, dynamic>> _postJson(
     Uri uri,
-    Map<String, dynamic> payload,
-  ) async {
+    Map<String, dynamic> payload, {
+    Map<String, String> headers = const <String, String>{},
+  }) async {
     final request = await _httpClient.postUrl(uri).timeout(_requestTimeout);
     request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
     request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    headers.forEach(request.headers.set);
     request.add(utf8.encode(jsonEncode(payload)));
 
     final response = await request.close().timeout(_requestTimeout);
     final body = await utf8.decoder.bind(response).join();
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpException(
-        'POST ${uri.path} failed (${response.statusCode}): $body',
+        'POST ${uri.toString()} failed (${response.statusCode}): $body',
         uri: uri,
       );
     }
@@ -504,15 +942,28 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
     return decoded;
   }
 
-  List<String> _parseModelIds(Map<String, dynamic> response) {
+  Map<String, String> _bearerHeaders(String apiKey) {
+    return <String, String>{
+      HttpHeaders.authorizationHeader: 'Bearer ${apiKey.trim()}',
+    };
+  }
+
+  Map<String, String> _claudeHeaders(String apiKey) {
+    return <String, String>{
+      'x-api-key': apiKey.trim(),
+      'anthropic-version': '2023-06-01',
+    };
+  }
+
+  List<String> _parseOpenAiModelIds(Map<String, dynamic> response) {
     final data = response['data'];
     if (data is! List) {
       return const [];
     }
     final ids = <String>[];
-    for (final entry in data) {
-      if (entry is Map<String, dynamic>) {
-        final id = entry['id']?.toString() ?? '';
+    for (final item in data) {
+      if (item is Map<String, dynamic>) {
+        final id = item['id']?.toString() ?? '';
         if (id.isNotEmpty) {
           ids.add(id);
         }
@@ -521,83 +972,147 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
     return ids;
   }
 
-  String _buildHealthMessage({
-    required bool modelAvailable,
+  List<String> _parseGeminiModelIds(Map<String, dynamic> response) {
+    final models = response['models'];
+    if (models is! List) {
+      return const [];
+    }
+    final ids = <String>[];
+    for (final item in models) {
+      if (item is Map<String, dynamic>) {
+        final name = item['name']?.toString() ?? '';
+        if (name.isEmpty) {
+          continue;
+        }
+        ids.add(name.startsWith('models/') ? name.substring(7) : name);
+      }
+    }
+    return ids;
+  }
+
+  String _buildModelHealthMessage({
+    required LlmProvider provider,
+    required String endpoint,
+    required String configuredModel,
     required String? resolvedModel,
     required List<String> availableModels,
   }) {
-    if (!modelAvailable) {
-      final list = availableModels.isEmpty
+    if (resolvedModel == null) {
+      final known = availableModels.isEmpty
           ? 'none'
           : availableModels.take(5).join(', ');
-      return 'Connected to local server, but model "$_configuredModelName" '
-          'is unavailable. Found: $list';
+      return '${provider.label} connected at $endpoint, but model '
+          '"$configuredModel" is unavailable. Found: $known';
     }
-
-    if (resolvedModel != null && !_isModelMatch(_configuredModelName, resolvedModel)) {
-      return 'Connected to local server. Configured "$_configuredModelName" '
-          'not found; using "$resolvedModel".';
+    if (!_isModelMatch(configuredModel, resolvedModel)) {
+      return '${provider.label} connected at $endpoint. Configured '
+          '"$configuredModel" not found; using "$resolvedModel".';
     }
-
-    return 'Connected to local server at $baseUrl using "$resolvedModel".';
+    return '${provider.label} connected at $endpoint using "$resolvedModel".';
   }
 
-  String? _resolveModelName(List<String> availableModels) {
-    final configured = _findModel(_configuredModelName, availableModels);
+  String? _resolveModelName({
+    required String configuredModel,
+    required List<String> availableModels,
+    required List<String> fallbackModels,
+    required bool allowConfiguredModelWhenListEmpty,
+  }) {
+    if (availableModels.isEmpty) {
+      return allowConfiguredModelWhenListEmpty
+          ? configuredModel
+          : null;
+    }
+
+    final configured = _findModel(configuredModel, availableModels);
     if (configured != null) {
       return configured;
     }
 
-    for (final fallback in _fallbackModels) {
+    for (final fallback in fallbackModels) {
       final candidate = _findModel(fallback, availableModels);
       if (candidate != null) {
         return candidate;
       }
     }
-
     return null;
   }
 
   String? _findModel(String desired, List<String> availableModels) {
-    final wanted = desired.toLowerCase();
-    for (final model in availableModels) {
-      final normalized = model.toLowerCase();
-      if (_isModelMatch(wanted, normalized)) {
-        return model;
+    for (final available in availableModels) {
+      if (_isModelMatch(desired, available)) {
+        return available;
       }
     }
     return null;
   }
 
   bool _isModelMatch(String desiredModel, String availableModelId) {
-    final desired = desiredModel.toLowerCase();
-    final available = availableModelId.toLowerCase();
-    return available == desired || available.startsWith('$desired:');
+    final desired = desiredModel.toLowerCase().trim();
+    final available = availableModelId.toLowerCase().trim();
+    return available == desired ||
+        available.startsWith('$desired:') ||
+        available.endsWith('/$desired');
   }
 
-  Uri _endpoint(String suffix) {
-    final basePath = _baseUri.path.endsWith('/')
-        ? _baseUri.path.substring(0, _baseUri.path.length - 1)
-        : _baseUri.path;
+  Uri _openAiEndpoint(Uri baseUri, String suffix) {
+    return _endpoint(baseUri, suffix);
+  }
+
+  Uri _endpoint(Uri baseUri, String suffix) {
+    return baseUri.replace(path: _joinPath(baseUri.path, suffix));
+  }
+
+  Uri _geminiModelsEndpoint(Uri baseUri, String apiKey) {
+    return baseUri.replace(
+      path: _joinPath(baseUri.path, 'models'),
+      queryParameters: <String, String>{'key': apiKey},
+    );
+  }
+
+  Uri _geminiGenerateEndpoint(Uri baseUri, String model, String apiKey) {
+    final modelName = model.startsWith('models/') ? model : 'models/$model';
+    return baseUri.replace(
+      path: _joinPath(baseUri.path, '$modelName:generateContent'),
+      queryParameters: <String, String>{'key': apiKey},
+    );
+  }
+
+  String _joinPath(String basePath, String suffix) {
+    final normalizedBase = basePath.endsWith('/')
+        ? basePath.substring(0, basePath.length - 1)
+        : basePath;
     final normalizedSuffix =
         suffix.startsWith('/') ? suffix.substring(1) : suffix;
-    return _baseUri.replace(path: '$basePath/$normalizedSuffix');
+    return '$normalizedBase/$normalizedSuffix';
   }
 
-  static Uri _normalizeBaseUri(String baseUrl) {
-    final trimmed = baseUrl.trim();
-    final raw = trimmed.isEmpty ? 'http://localhost:11434/v1' : trimmed;
-    final parsed = Uri.parse(raw);
+  static Uri _normalizeOpenAiBaseUri(
+    String baseUrl, {
+    required String defaultBase,
+  }) {
+    return _normalizeRequiredSuffix(
+      baseUrl,
+      defaultBase: defaultBase,
+      requiredSuffix: '/v1',
+    );
+  }
 
+  static Uri _normalizeRequiredSuffix(
+    String rawBaseUrl, {
+    required String defaultBase,
+    required String requiredSuffix,
+  }) {
+    final raw = rawBaseUrl.trim().isEmpty ? defaultBase : rawBaseUrl.trim();
+    final parsed = Uri.parse(raw);
     var path = parsed.path;
     if (path.isEmpty || path == '/') {
-      path = '/v1';
+      path = requiredSuffix;
     } else {
       if (path.endsWith('/')) {
         path = path.substring(0, path.length - 1);
       }
-      if (!path.endsWith('/v1')) {
-        path = '$path/v1';
+      if (!path.endsWith(requiredSuffix)) {
+        path = '$path$requiredSuffix';
       }
     }
     return parsed.replace(path: path);
@@ -611,9 +1126,73 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
   }
 
   Future<void> _onRequestFailure(Object error) async {
-    debugPrint('[Sensei LLM] Request failed: $error');
+    debugPrint('[Sensei LLM] Request failed (${_currentProvider.label}): $error');
     await checkHealth(force: true);
   }
+
+  String _buildExtractionPrompt(String input, LlmParsingContext context) {
+    final contextBlock = _buildContextBlock(context);
+    return '''Extract structured data from this input.
+Return ONLY valid JSON with keys:
+- subject_name (string or null)
+- attribute_key (snake_case string or null)
+- attribute_value (string or null)
+- is_query (boolean)
+- confidence (number 0..1)
+
+$contextBlock
+Input: "$input"''';
+  }
+
+  String _buildContextBlock(LlmParsingContext context) {
+    if (!context.hasAnyHints) {
+      return 'Context: none';
+    }
+
+    final lines = <String>['Context:'];
+    final uriHint = context.parserSubjectUriHint?.trim();
+    if (uriHint != null && uriHint.isNotEmpty) {
+      lines.add('- parser_subject_uri_hint: $uriHint');
+    }
+    if (context.recentTargetUris.isNotEmpty) {
+      lines.add('- recent_target_uris: ${context.recentTargetUris.take(5).join(', ')}');
+    }
+    if (context.hintAttributes.isNotEmpty) {
+      lines.add('- known_attribute_keys: ${context.hintAttributes.take(8).join(', ')}');
+    }
+    if (context.recentSummonings.isNotEmpty) {
+      final cleaned = context.recentSummonings
+          .take(3)
+          .map((s) => _truncate(s.replaceAll('\n', ' '), 120))
+          .join(' | ');
+      lines.add('- recent_summonings: $cleaned');
+    }
+    return lines.join('\n');
+  }
+
+  static String _truncate(String text, int maxLength) {
+    if (text.length <= maxLength) return text;
+    return '${text.substring(0, maxLength - 3)}...';
+  }
+
+  static const _senseiCorePrompt = '''You are the Sensei for ROLODOJO.
+You operate as a structured ledger assistant.
+Rules:
+- Use only information present in the input/context.
+- Preserve exact values for facts.
+- Attribute keys must be snake_case.
+- Dojo URIs follow dojo.<category>.<identifier>.
+- Valid categories include con (contact), ent (entity), med (medical), sys (system).
+- Return strict machine-readable output when requested.''';
+
+  static const _extractionSystemPrompt = '''Extract subject, attribute key/value, and query intent.
+If extraction is uncertain, lower confidence and keep fields null.''';
+
+  static const _synthesisSystemPrompt =
+      'Generate one concise, factual insight from provided ledger facts.';
+
+  static const _summarySystemPrompt =
+      'Summarize briefly without adding unverified details.';
 
   LlmExtraction _parseExtractionResponse(String responseText) {
     final parsed = _extractJsonMap(responseText);
@@ -736,7 +1315,6 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
     final recentText = recentRolos.isEmpty
         ? ''
         : '\nRecent activity:\n${recentRolos.map((r) => '- $r').join('\n')}';
-
     return 'Given these facts about $subjectUri:\n$factsText$recentText\n\n'
         'Return one concise insight sentence only.';
   }
@@ -765,7 +1343,7 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
     return fallback;
   }
 
-  /// Enhanced rule-based extraction (fallback when LLM is unavailable).
+  /// Enhanced rule-based extraction fallback.
   LlmExtraction _ruleBasedExtraction(String input) {
     final parser = InputParser();
     final parsed = parser.parse(input);
@@ -786,7 +1364,7 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
     );
   }
 
-  /// Rule-based synthesis (fallback when LLM is unavailable).
+  /// Rule-based synthesis fallback.
   String _ruleBasedSynthesis(
     String subjectUri,
     Map<String, String> facts,
@@ -796,25 +1374,38 @@ Always respond with valid JSON only. Never make up data that isn't in the input.
 
     final parts = <String>[];
 
-    // Look for patterns in the facts
     if (facts.length >= 3) {
       parts.add(
         '${subjectUri.split('.').last} has ${facts.length} known attributes',
       );
     }
 
-    // Look for time-related facts
     for (final entry in facts.entries) {
       if (entry.key.contains('birthday') || entry.key.contains('anniversary')) {
         parts.add('Note: ${entry.key} is ${entry.value}');
       }
     }
 
-    // Look for relationships in recent rolos
     if (recentRolos.length >= 2) {
       parts.add('Active recently with ${recentRolos.length} interactions');
     }
 
     return parts.isEmpty ? 'No new insights detected' : parts.join('. ');
   }
+}
+
+class _ProviderConfig {
+  final Uri baseUri;
+  final String configuredModel;
+  final String apiKey;
+  final List<String> fallbackModels;
+
+  const _ProviderConfig({
+    required this.baseUri,
+    required this.configuredModel,
+    required this.apiKey,
+    this.fallbackModels = const [],
+  });
+
+  bool get hasApiKey => apiKey.trim().isNotEmpty;
 }

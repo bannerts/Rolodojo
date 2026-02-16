@@ -18,8 +18,8 @@ import 'services/synthesis_service.dart';
 /// Provides initialized Dojo services to the widget tree.
 ///
 /// All services are wired to the encrypted SQLCipher database
-/// through the repository layer. The local LLM is initialized
-/// for on-device inference (Zero-Cloud policy).
+/// through the repository layer. The Sensei LLM is initialized
+/// in local-first mode with optional provider switching.
 class DojoProvider extends InheritedWidget {
   final DojoService dojoService;
   final LibrarianService librarianService;
@@ -53,7 +53,7 @@ class DojoProvider extends InheritedWidget {
   @override
   bool updateShouldNotify(DojoProvider oldWidget) => false;
 
-  /// Opens the encrypted database, initializes the local LLM,
+  /// Opens the encrypted database, initializes the Sensei LLM,
   /// and creates all service instances.
   static Future<DojoProvider> initialize({required Widget child}) async {
     final securityService = SecurityService();
@@ -67,7 +67,11 @@ class DojoProvider extends InheritedWidget {
     final recordRepo = RecordRepositoryImpl(dataSource);
     final attributeRepo = AttributeRepositoryImpl(dataSource);
 
-    // Initialize local LLM server (Ollama/OpenAI-compatible endpoint).
+    // Initialize LLM providers (local-first with optional online providers).
+    const llmProviderRaw = String.fromEnvironment(
+      'LLM_PROVIDER',
+      defaultValue: 'llama',
+    );
     const llmBaseUrl = String.fromEnvironment(
       'LLAMA_BASE_URL',
       defaultValue: 'http://localhost:11434/v1',
@@ -76,9 +80,58 @@ class DojoProvider extends InheritedWidget {
       'LLAMA_MODEL',
       defaultValue: 'llama3.3',
     );
+    const claudeBaseUrl = String.fromEnvironment(
+      'CLAUDE_BASE_URL',
+      defaultValue: 'https://api.anthropic.com/v1',
+    );
+    const claudeModel = String.fromEnvironment(
+      'CLAUDE_MODEL',
+      defaultValue: 'claude-3-5-sonnet-latest',
+    );
+    const claudeApiKey = String.fromEnvironment('CLAUDE_API_KEY');
+    const grokBaseUrl = String.fromEnvironment(
+      'GROK_BASE_URL',
+      defaultValue: 'https://api.x.ai/v1',
+    );
+    const grokModel = String.fromEnvironment(
+      'GROK_MODEL',
+      defaultValue: 'grok-2-latest',
+    );
+    const grokApiKey = String.fromEnvironment('GROK_API_KEY');
+    const geminiBaseUrl = String.fromEnvironment(
+      'GEMINI_BASE_URL',
+      defaultValue: 'https://generativelanguage.googleapis.com/v1beta',
+    );
+    const geminiModel = String.fromEnvironment(
+      'GEMINI_MODEL',
+      defaultValue: 'gemini-1.5-flash',
+    );
+    const geminiApiKey = String.fromEnvironment('GEMINI_API_KEY');
+    const chatGptBaseUrl = String.fromEnvironment(
+      'OPENAI_BASE_URL',
+      defaultValue: 'https://api.openai.com/v1',
+    );
+    const chatGptModel = String.fromEnvironment(
+      'OPENAI_MODEL',
+      defaultValue: 'gpt-4o-mini',
+    );
+    const chatGptApiKey = String.fromEnvironment('OPENAI_API_KEY');
     final senseiLlm = LocalLlmService(
-      baseUrl: llmBaseUrl,
-      modelName: llmModel,
+      initialProvider: LlmProvider.fromId(llmProviderRaw),
+      localBaseUrl: llmBaseUrl,
+      localModel: llmModel,
+      claudeBaseUrl: claudeBaseUrl,
+      claudeModel: claudeModel,
+      claudeApiKey: claudeApiKey,
+      grokBaseUrl: grokBaseUrl,
+      grokModel: grokModel,
+      grokApiKey: grokApiKey,
+      geminiBaseUrl: geminiBaseUrl,
+      geminiModel: geminiModel,
+      geminiApiKey: geminiApiKey,
+      chatGptBaseUrl: chatGptBaseUrl,
+      chatGptModel: chatGptModel,
+      chatGptApiKey: chatGptApiKey,
     );
     try {
       // modelPath is retained for interface compatibility.
