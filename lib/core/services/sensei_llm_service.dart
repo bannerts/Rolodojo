@@ -59,6 +59,29 @@ class LlmExtraction {
       subjectName != null && attributeKey != null && attributeValue != null;
 }
 
+/// Runtime debug snapshot for the most recent LLM parse attempt.
+class LlmParseDebugSnapshot {
+  final DateTime timestamp;
+  final LlmProvider provider;
+  final String model;
+  final String input;
+  final String contextBlock;
+  final String extractionPrompt;
+  final bool sentToProvider;
+  final String note;
+
+  const LlmParseDebugSnapshot({
+    required this.timestamp,
+    required this.provider,
+    required this.model,
+    required this.input,
+    required this.contextBlock,
+    required this.extractionPrompt,
+    required this.sentToProvider,
+    required this.note,
+  });
+}
+
 /// Supported LLM providers.
 enum LlmProvider {
   localLlama(
@@ -197,6 +220,7 @@ abstract class SenseiLlmService {
   LlmProvider get currentProvider;
   List<LlmProvider> get supportedProviders;
   ValueListenable<LlmHealthStatus> get healthStatus;
+  ValueListenable<LlmParseDebugSnapshot?> get parseDebugSnapshot;
   bool isApiKeyConfigured(LlmProvider provider);
 
   Future<void> initialize({
@@ -346,6 +370,8 @@ class LocalLlmService implements SenseiLlmService {
   final HttpClient _httpClient = HttpClient();
   final ValueNotifier<LlmHealthStatus> _healthStatusNotifier =
       ValueNotifier(const LlmHealthStatus());
+  final ValueNotifier<LlmParseDebugSnapshot?> _parseDebugNotifier =
+      ValueNotifier<LlmParseDebugSnapshot?>(null);
   late final Map<LlmProvider, _ProviderConfig> _providerConfigs;
   final Map<LlmProvider, String> _activeModels = <LlmProvider, String>{};
   Uri? _activeGeminiBaseUri;
@@ -386,6 +412,10 @@ class LocalLlmService implements SenseiLlmService {
 
   @override
   ValueListenable<LlmHealthStatus> get healthStatus => _healthStatusNotifier;
+
+  @override
+  ValueListenable<LlmParseDebugSnapshot?> get parseDebugSnapshot =>
+      _parseDebugNotifier;
 
   @override
   bool isApiKeyConfigured(LlmProvider provider) {
@@ -744,26 +774,61 @@ class LocalLlmService implements SenseiLlmService {
     LlmParsingContext context = const LlmParsingContext(),
   }) async {
     final fallback = _ruleBasedExtraction(input);
+    final contextBlock = _buildContextBlock(context);
+    final extractionPrompt = _buildExtractionPrompt(
+      input,
+      context,
+      contextBlockOverride: contextBlock,
+    );
     if (input.trim().isEmpty) {
+      _recordParseDebugSnapshot(
+        input: input,
+        contextBlock: contextBlock,
+        extractionPrompt: extractionPrompt,
+        sentToProvider: false,
+        note: 'Input empty. Used rule-based fallback.',
+      );
       return fallback;
     }
 
     final health = await checkHealth();
     if (!health.isHealthy) {
+      _recordParseDebugSnapshot(
+        input: input,
+        contextBlock: contextBlock,
+        extractionPrompt: extractionPrompt,
+        sentToProvider: false,
+        note: 'Provider unhealthy. Used rule-based fallback.',
+      );
       return fallback;
     }
+
+    _recordParseDebugSnapshot(
+      input: input,
+      contextBlock: contextBlock,
+      extractionPrompt: extractionPrompt,
+      sentToProvider: true,
+      note: 'Sent extraction prompt to provider.',
+    );
 
     final stopwatch = Stopwatch()..start();
     try {
       final responseText = await _createCompletion(
         systemPrompt: '$_senseiCorePrompt\n$_extractionSystemPrompt',
-        userPrompt: _buildExtractionPrompt(input, context),
+        userPrompt: extractionPrompt,
         maxTokens: 180,
         temperature: 0.1,
       );
       final llmExtraction = _parseExtractionResponse(responseText);
       return _pickBestExtraction(fallback, llmExtraction);
     } catch (e) {
+      _recordParseDebugSnapshot(
+        input: input,
+        contextBlock: contextBlock,
+        extractionPrompt: extractionPrompt,
+        sentToProvider: true,
+        note: 'Provider request failed: $e',
+      );
       await _onRequestFailure(e);
       return fallback;
     } finally {
@@ -938,6 +1003,7 @@ class LocalLlmService implements SenseiLlmService {
     _httpClient.close(force: true);
     _isReady = false;
     _healthStatusNotifier.dispose();
+    _parseDebugNotifier.dispose();
     debugPrint('[Sensei LLM] Client disposed');
   }
 
@@ -1471,8 +1537,31 @@ class LocalLlmService implements SenseiLlmService {
     return '$_modelStoragePrefix${provider.id}';
   }
 
-  String _buildExtractionPrompt(String input, LlmParsingContext context) {
-    final contextBlock = _buildContextBlock(context);
+  void _recordParseDebugSnapshot({
+    required String input,
+    required String contextBlock,
+    required String extractionPrompt,
+    required bool sentToProvider,
+    required String note,
+  }) {
+    _parseDebugNotifier.value = LlmParseDebugSnapshot(
+      timestamp: DateTime.now().toUtc(),
+      provider: _currentProvider,
+      model: activeModelName,
+      input: input,
+      contextBlock: contextBlock,
+      extractionPrompt: extractionPrompt,
+      sentToProvider: sentToProvider,
+      note: note,
+    );
+  }
+
+  String _buildExtractionPrompt(
+    String input,
+    LlmParsingContext context, {
+    String? contextBlockOverride,
+  }) {
+    final contextBlock = contextBlockOverride ?? _buildContextBlock(context);
     return '''Extract structured data from this input.
 Return ONLY valid JSON with keys:
 - subject_name (string or null)
