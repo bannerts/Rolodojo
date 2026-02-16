@@ -1,66 +1,56 @@
 # 🏯 ROLODOJO
 
-#AWAKENING PROMPT
-"Sensei, initialize the Dojo. Index the Instruction Set and the 8 scrolls in this directory. Refer to @ROLODOJO_PLAN.md and @ROLODOJO_SYSTEM_MANIFEST.md to begin Phase 1. Start by creating the folder structure for a Flutter Clean Architecture project. Do not begin coding until you provide a 'Project Heartbeat' summary of our database and security architecture for my approval."
+Privacy-first, local-encrypted personal ledger built with Flutter.
 
+ROLODOJO stores user inputs as auditable ledger events ("Rolos"), keeps current facts in a URI-addressed vault, and routes Sensei parsing through a local-first LLM setup with rule-based fallback.
 
-**Privacy-First | Local-Encrypted | AI-Orchestrated Personal Ledger**
+## What the app does now
 
-ROLODOJO is a "Digital Sensei" built with Flutter. It manages contacts, entities, and history through a structured, URI-addressable system. Every fact is audited, every change is ledgered, and all data is locked behind SQLCipher and Biometrics.
+- Captures user summonings into `tbl_rolos`
+- Parses structured facts and upserts `tbl_records` + `tbl_attributes`
+- Preserves audit linkage with `last_rolo_id` on attribute changes
+- Stores Sensei responses in `tbl_sensei` linked by `input_rolo_id`
+- Maintains owner profile in `tbl_user`
+- Supports Journal Mode entries and daily/weekly summaries
+- Provides search, vault inspection, backup/export, and optimization tools
 
----
+## Architecture
 
-## 🤖 AI Agent Protocol (The Awakening)
-This repository is optimized for AI-first development using **Claude Code** or **Cursor**. 
+- **Framework:** Flutter (Dart)
+- **Layers:** Data / Domain / Presentation (Clean Architecture)
+- **Storage:** SQLCipher via `sqflite_sqlcipher`
+- **Secrets:** `flutter_secure_storage`
+- **Biometrics:** `local_auth`
+- **Backup encryption:** AES-256-CBC via `encrypt`
+- **LLM routing:** local-first (`localhost`) with optional online providers
 
-**To initialize the Sensei:**
-1. Point the agent to `@INSTRUCTION_SET.md`.
-2. Ensure the agent has indexed the **8 Scrolls** in the root directory.
-3. Require a **"Project Heartbeat"** summary before the agent writes any code.
+## Local-first LLM behavior
 
----
+- Default provider is local llama endpoint (`http://localhost:11434/v1`)
+- If local LLM is unavailable, the app keeps working with rule-based parsing
+- Cloud providers are optional and require explicit API key configuration in Settings
 
-## 🏛️ Architectural Pillars
-* **The Ledger:** Immutable history of all inputs (`tbl_rolos`).
-* **The Vault:** URI-based attribute storage with soft-delete logic (`tbl_attributes`).
-* **Owner Profile:** Dedicated user profile storage (`tbl_user`).
-* **Sensei Journal:** Persisted Sensei responses linked to source inputs (`tbl_sensei`).
-* **Security:** SQLCipher (AES-256) + Biometric Secure Storage key management.
-* **Architecture:** Flutter Clean Architecture (Data, Domain, Presentation).
+See:
+- [`local_inference.md`](./local_inference.md)
+- [`ledger_structure.md`](./ledger_structure.md)
 
----
+## Run and test
 
-## 🧭 Local-First Architecture
-- [`local_inference.md`](./local_inference.md): Local orchestrator rules for using the local Llama endpoint (`localhost`) with quantized fallback guidance.
-- [`ledger_structure.md`](./ledger_structure.md): URI ledger format and local write contract, including explicit local-only privacy boundaries.
-- Optional online provider mode is supported via Settings (`Claude`, `Grok`, `Gemini`, `ChatGPT`) when API keys are provided.
-- Runtime provider boot option: `--dart-define=LLM_PROVIDER=llama|claude|grok|gemini|chatgpt`
+```bash
+flutter pub get
+flutter run
+flutter test
+flutter test integration_test/system_integrity_test.dart
+```
 
----
+Optional provider override:
 
-## 🗺️ Phase 1 Checklist (The Foundation)
-| Task | Status | Tool |
-| :--- | :---: | :--- |
-| **Project Init:** Flutter setup & Clean Arch Folders | ⬜ | Claude Code |
-| **Security Layer:** SQLCipher & Secure Storage | ⬜ | Claude Code |
-| **Database Schema:** Rolo, Record, and Attribute tables | ⬜ | Claude Code |
-| **URI Routing:** Logic for `dojo.con.*` and `dojo.ent.*` | ⬜ | Claude Code |
-| **Sensei Bar:** Basic text input & Rolo creation | ⬜ | Claude Code |
+```bash
+flutter run --dart-define=LLM_PROVIDER=llama
+```
 
----
+## Notes
 
-## 🛠️ Tech Stack
-* **Framework:** Flutter (Dart)
-* **Database:** sqflite_sqlcipher
-* **Secrets:** flutter_secure_storage
-* **Auth:** local_auth (Biometrics)
-* **AI:** Claude 3.5 / 3.7 (via Claude Code CLI)
-
----
-
-## 🛡️ Security Note
-All database files (`.db`, `.sqlite`) and local environment secrets are excluded via `.gitignore`. This project follows a **Zero-Cloud Default** policy.
-
-## 📍 Location Metadata
-- Manual Sensei inputs capture GPS coordinates and store them in `Rolo.metadata.location` when device location services and permissions are available.
+- Database and secrets remain local to the device by default.
+- Summonings may include location metadata when permissions are granted.
 

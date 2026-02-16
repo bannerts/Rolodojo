@@ -164,17 +164,11 @@ class _DojoHomePageState extends State<DojoHomePage> {
         }
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _senseiState = SenseiState.idle;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: $e'),
-            backgroundColor: DojoColors.alert,
-          ),
-        );
-      }
+      if (!mounted) return;
+      setState(() {
+        _senseiState = SenseiState.idle;
+      });
+      _showSnackBar('Error: $e', backgroundColor: DojoColors.alert);
     }
   }
 
@@ -188,14 +182,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
       await dojo.processJournalEntry(text);
       await _loadRecentJournalEntries();
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Journal error: $e'),
-            backgroundColor: DojoColors.alert,
-          ),
-        );
-      }
+      _showSnackBar('Journal error: $e', backgroundColor: DojoColors.alert);
     } finally {
       if (mounted) {
         setState(() {
@@ -206,60 +193,40 @@ class _DojoHomePageState extends State<DojoHomePage> {
   }
 
   Future<void> _generateDailySummary() async {
-    if (_isGeneratingJournalSummary) return;
-    setState(() => _isGeneratingJournalSummary = true);
-    try {
-      final dojo = DojoProvider.of(context).dojoService;
-      await dojo.generateDailyJournalSummary();
-      await _loadRecentJournalEntries();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Daily journal summary added'),
-            backgroundColor: DojoColors.graphite,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Daily summary failed: $e'),
-            backgroundColor: DojoColors.alert,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isGeneratingJournalSummary = false);
-      }
-    }
+    await _generateJournalSummary(
+      action: () async {
+        final dojo = DojoProvider.of(context).dojoService;
+        await dojo.generateDailyJournalSummary();
+      },
+      successMessage: 'Daily journal summary added',
+      failurePrefix: 'Daily summary failed',
+    );
   }
 
   Future<void> _generateWeeklySummary() async {
+    await _generateJournalSummary(
+      action: () async {
+        final dojo = DojoProvider.of(context).dojoService;
+        await dojo.generateWeeklyJournalSummary();
+      },
+      successMessage: 'Weekly journal summary added',
+      failurePrefix: 'Weekly summary failed',
+    );
+  }
+
+  Future<void> _generateJournalSummary({
+    required Future<void> Function() action,
+    required String successMessage,
+    required String failurePrefix,
+  }) async {
     if (_isGeneratingJournalSummary) return;
     setState(() => _isGeneratingJournalSummary = true);
     try {
-      final dojo = DojoProvider.of(context).dojoService;
-      await dojo.generateWeeklyJournalSummary();
+      await action();
       await _loadRecentJournalEntries();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Weekly journal summary added'),
-            backgroundColor: DojoColors.graphite,
-          ),
-        );
-      }
+      _showSnackBar(successMessage);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Weekly summary failed: $e'),
-            backgroundColor: DojoColors.alert,
-          ),
-        );
-      }
+      _showSnackBar('$failurePrefix: $e', backgroundColor: DojoColors.alert);
     } finally {
       if (mounted) {
         setState(() => _isGeneratingJournalSummary = false);
@@ -272,6 +239,21 @@ class _DojoHomePageState extends State<DojoHomePage> {
         .split('_')
         .map((w) => w.isEmpty ? '' : '${w[0].toUpperCase()}${w.substring(1)}')
         .join(' ');
+  }
+
+  void _showSnackBar(
+    String message, {
+    Color backgroundColor = DojoColors.graphite,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: backgroundColor,
+      ),
+    );
   }
 
   @override
@@ -913,7 +895,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: _getTypeBadgeColor(rolo.type),
+                    color: _roloTypeBadgeColor(rolo.type),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -1057,24 +1039,13 @@ class _DojoHomePageState extends State<DojoHomePage> {
                 setSheetState(() {
                   recordsByUri[uri] = updated;
                 });
-                if (mounted) {
-                  ScaffoldMessenger.of(this.context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Record name updated'),
-                      backgroundColor: DojoColors.graphite,
-                    ),
-                  );
-                  unawaited(_loadRecentRolos());
-                }
+                _showSnackBar('Record name updated');
+                unawaited(_loadRecentRolos());
               } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(this.context).showSnackBar(
-                    SnackBar(
-                      content: Text('Unable to update record: $e'),
-                      backgroundColor: DojoColors.alert,
-                    ),
-                  );
-                }
+                _showSnackBar(
+                  'Unable to update record: $e',
+                  backgroundColor: DojoColors.alert,
+                );
               }
             }
 
@@ -1110,24 +1081,13 @@ class _DojoHomePageState extends State<DojoHomePage> {
                     roloTexts[updated.lastRoloId] = rolo.summoningText;
                   }
                 });
-                if (mounted) {
-                  ScaffoldMessenger.of(this.context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Attribute updated'),
-                      backgroundColor: DojoColors.graphite,
-                    ),
-                  );
-                  unawaited(_loadRecentRolos());
-                }
+                _showSnackBar('Attribute updated');
+                unawaited(_loadRecentRolos());
               } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(this.context).showSnackBar(
-                    SnackBar(
-                      content: Text('Unable to update attribute: $e'),
-                      backgroundColor: DojoColors.alert,
-                    ),
-                  );
-                }
+                _showSnackBar(
+                  'Unable to update attribute: $e',
+                  backgroundColor: DojoColors.alert,
+                );
               }
             }
 
@@ -1144,24 +1104,13 @@ class _DojoHomePageState extends State<DojoHomePage> {
                     recordAttributes.remove(uri);
                   }
                 });
-                if (mounted) {
-                  ScaffoldMessenger.of(this.context).showSnackBar(
-                    SnackBar(
-                      content: Text('Deleted ${_formatKey(attribute.key)}'),
-                      backgroundColor: DojoColors.graphite,
-                    ),
-                  );
-                  unawaited(_loadRecentRolos());
-                }
+                _showSnackBar('Deleted ${_formatKey(attribute.key)}');
+                unawaited(_loadRecentRolos());
               } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(this.context).showSnackBar(
-                    SnackBar(
-                      content: Text('Unable to delete attribute: $e'),
-                      backgroundColor: DojoColors.alert,
-                    ),
-                  );
-                }
+                _showSnackBar(
+                  'Unable to delete attribute: $e',
+                  backgroundColor: DojoColors.alert,
+                );
               }
             }
 
@@ -1296,16 +1245,6 @@ class _DojoHomePageState extends State<DojoHomePage> {
     return trimmed;
   }
 
-  Color _getTypeBadgeColor(RoloType type) {
-    switch (type) {
-      case RoloType.input:
-        return DojoColors.senseiGold;
-      case RoloType.synthesis:
-        return DojoColors.success;
-      case RoloType.request:
-        return DojoColors.textSecondary;
-    }
-  }
 }
 
 /// A card representing a single Rolo in the stream.
@@ -1331,7 +1270,7 @@ class _RoloCard extends StatelessWidget {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
-                      color: _getTypeBadgeColor(),
+                      color: _roloTypeBadgeColor(rolo.type),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(
@@ -1378,17 +1317,6 @@ class _RoloCard extends StatelessWidget {
     );
   }
 
-  Color _getTypeBadgeColor() {
-    switch (rolo.type) {
-      case RoloType.input:
-        return DojoColors.senseiGold;
-      case RoloType.synthesis:
-        return DojoColors.success;
-      case RoloType.request:
-        return DojoColors.textSecondary;
-    }
-  }
-
   String _formatTimestamp(DateTime dt) {
     final now = DateTime.now();
     final diff = now.difference(dt);
@@ -1402,6 +1330,17 @@ class _RoloCard extends StatelessWidget {
     } else {
       return '${dt.month}/${dt.day}';
     }
+  }
+}
+
+Color _roloTypeBadgeColor(RoloType type) {
+  switch (type) {
+    case RoloType.input:
+      return DojoColors.senseiGold;
+    case RoloType.synthesis:
+      return DojoColors.success;
+    case RoloType.request:
+      return DojoColors.textSecondary;
   }
 }
 

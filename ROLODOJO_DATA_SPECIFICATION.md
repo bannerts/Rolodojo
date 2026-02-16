@@ -1,48 +1,62 @@
-# 💾 ROLODOJO Data & JSON Specification
+# 💾 ROLODOJO Data Specification (Current Implementation)
 
-## 1. The Rolo Object (Standard Payload)
-Every Rolo entry in `tbl_rolos` must follow this JSON structure in the `data_payload` column to ensure cross-platform compatibility.
+This file describes the data shapes currently used by the app.
 
+## 1) Rolo row (`tbl_rolos`)
+
+Rolo events are stored as table columns, not in a `data_payload` column.
+
+Core fields:
+
+- `rolo_id` (TEXT, UUID, PK)
+- `type` (`input | request | synthesis`)
+- `summoning_text` (TEXT)
+- `target_uri` (TEXT, nullable)
+- `parent_rolo_id` (TEXT, nullable)
+- `metadata` (TEXT JSON)
+- `timestamp` (TEXT ISO8601 UTC)
+
+Example `metadata` JSON:
+
+```json
 {
-  "header": {
-    "version": "1.0",
-    "source_device": "User_Device_ID",
-    "confidence_score": 1.0
-  },
-  "entities": [
-    {
-      "uri": "dojo.con.joe",
-      "action": "UPDATE_ATTR",
-      "attributes": {
-        "coffee_preference": "Dark Roast",
-        "last_seen": "2026-02-01T11:00:00Z"
-      }
-    }
-  ],
-  "context": {
-    "location": "32.123, -95.456",
-    "weather": "Clear",
-    "trigger": "Manual_Entry"
-  }
+  "trigger": "Manual_Entry",
+  "confidence_score": 0.91,
+  "location": "29.1234,-95.5678",
+  "weather": "Clear",
+  "source_id": "optional-external-id",
+  "source_device": "optional-device-id"
 }
+```
 
-## 2. Formatting Standards
-To prevent data fragmentation, the Sensei must enforce these formats:
+## 2) Record + Attribute model
 
-| Data Type | Standard | Example |
-| :--- | :--- | :--- |
-| **Dates/Times** | ISO 8601 (UTC) | `2026-02-01T15:30:00Z` |
-| **Phone Numbers** | E.164 Format | `+12345678900` |
-| **Names** | Title Case | `Joe Smith` |
-| **URIs** | Lowercase/Underscore | `dojo.con.joe_smith` |
-| **Coordinates** | Decimal Degrees | `29.1234, -95.5678` |
+### `tbl_records`
 
-## 3. User Profile Object (`tbl_user`)
-Dedicated owner profile data is stored outside URI contact records:
+- `uri` (PK, e.g. `dojo.con.joe`)
+- `display_name`
+- `payload` (optional JSON blob)
+- `last_rolo_id` (FK to source rolo)
+- `updated_at` (ISO8601)
 
+### `tbl_attributes`
+
+- `subject_uri` + `attr_key` (composite PK)
+- `attr_value` (nullable for soft delete)
+- `last_rolo_id` (FK to source rolo)
+- `is_encrypted` (0/1 flag)
+- `updated_at`
+
+Soft delete behavior: `attr_value` becomes `NULL`, while key + `last_rolo_id` are retained for auditability.
+
+## 3) Owner profile (`tbl_user`)
+
+Owner identity/preferences are stored outside contact records.
+
+```json
 {
   "user_id": "owner",
-  "display_name": "Scott Bannert",
+  "display_name": "Dojo User",
   "preferred_name": "Scott",
   "profile_json": {
     "timezone": "America/Chicago",
@@ -51,27 +65,30 @@ Dedicated owner profile data is stored outside URI contact records:
   "created_at": "2026-02-16T12:00:00Z",
   "updated_at": "2026-02-16T12:00:00Z"
 }
+```
 
-## 4. Sensei Response Object (`tbl_sensei`)
-Every user input should produce a stored Sensei response row:
+## 4) Sensei response row (`tbl_sensei`)
 
+Each user input can persist a linked Sensei response.
+
+```json
 {
   "sensei_id": "uuid-v4",
   "input_rolo_id": "uuid-v4",
   "target_uri": "dojo.con.joe",
-  "response_text": "Updated Joe's Coffee Preference to Espresso",
+  "response_text": "Updated Joe's coffee preference to Espresso",
   "provider": "llama",
   "model": "llama3.3",
   "confidence_score": 0.91,
   "created_at": "2026-02-16T12:01:00Z"
 }
+```
 
-## 5. Attribute Vault Rules
-- **Keys:** Use `snake_case` for all keys (e.g., `gate_code`, not `GateCode`).
-- **Secret Data:** If an attribute is marked `is_encrypted: 1` in the database, the value must be encrypted via SQLCipher before storage.
-- **Nullification:** When a user "removes" a fact, the value becomes `null` but the key remains to preserve the `last_rolo_id` audit link.
+## 5) Normalization guidance
 
-## 6. Conflict Resolution
-- **Rule of Recency:** If two Rolos provide conflicting data for the same URI attribute, the Rolo with the latest `timestamp` wins.
-- **History:** The previous value is moved to a `history` array within the record's payload before being overwritten.
-- 
+The parser and UI should prefer:
+
+- snake_case attribute keys
+- lowercase URI segments with underscores
+- ISO8601 timestamps
+- normalized whitespace in user-entered values
