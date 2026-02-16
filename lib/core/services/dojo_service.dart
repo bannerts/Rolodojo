@@ -823,6 +823,7 @@ class DojoService {
     final bundle = await _buildVaultContextBundle(
       query: query,
       parsed: parsed,
+      primaryUser: primaryUser,
     );
 
     if (_senseiLlm != null) {
@@ -841,6 +842,11 @@ class DojoService {
       }
     }
 
+    if (bundle.directAnswer != null) {
+      return '${bundle.directAnswer}\n\n'
+          '${_buildSourcesUsedSection(bundle.sourcesUsed)}';
+    }
+
     if (!bundle.hasFacts) {
       return 'I searched your vault but could not find enough related facts '
           'for that question yet.\n\n'
@@ -855,19 +861,63 @@ class DojoService {
   Future<_VaultContextBundle> _buildVaultContextBundle({
     required String query,
     required ParsedInput parsed,
+    required UserProfile? primaryUser,
   }) async {
     final normalizedQuery = _normalizeQueryForVaultSearch(query);
+    final searchTerms = _extractVaultSearchTerms(normalizedQuery);
     final contextLines = <String>[];
     final factLines = <String>[];
     final sourceMap = <String, Set<String>>{};
+    final recordCache = <String, Record>{};
+    final attributeCache = <String, Attribute>{};
+    final roloCache = <String, Rolo>{};
 
     void addSource(String uri, String key) {
       sourceMap.putIfAbsent(uri, () => <String>{}).add(key);
     }
 
-    final recordsByName = await _recordRepository.searchByName(normalizedQuery);
-    final attrsBySearch = await _attributeRepository.search(normalizedQuery);
-    final rolosBySearch = await _roloRepository.search(normalizedQuery);
+    void addRecordCandidate(Record record) {
+      recordCache.putIfAbsent(record.uri, () => record);
+    }
+
+    void addAttributeCandidate(Attribute attribute) {
+      final cacheKey = '${attribute.subjectUri}::${attribute.key}';
+      attributeCache.putIfAbsent(cacheKey, () => attribute);
+    }
+
+    void addRoloCandidate(Rolo rolo) {
+      roloCache.putIfAbsent(rolo.id, () => rolo);
+    }
+
+    Future<void> collectBySearchTerm(String term) async {
+      final cleaned = term.trim();
+      if (cleaned.isEmpty) {
+        return;
+      }
+
+      final records = await _recordRepository.searchByName(cleaned);
+      for (final record in records.take(10)) {
+        addRecordCandidate(record);
+      }
+
+      final attrs = await _attributeRepository.search(cleaned);
+      for (final attr in attrs.take(16)) {
+        addAttributeCandidate(attr);
+      }
+
+      final rolos = await _roloRepository.search(cleaned);
+      for (final rolo in rolos.take(12)) {
+        addRoloCandidate(rolo);
+      }
+    }
+
+    if (searchTerms.isEmpty) {
+      await collectBySearchTerm(normalizedQuery);
+    } else {
+      for (final term in searchTerms.take(6)) {
+        await collectBySearchTerm(term);
+      }
+    }
 
     Record? directRecord;
     List<Attribute> directAttributes = const [];
@@ -877,6 +927,57 @@ class DojoService {
       directRecord = await _recordRepository.getByUri(subjectUri);
       directAttributes = await _attributeRepository.getByUri(subjectUri);
       directRolos = await _roloRepository.getByTargetUri(subjectUri);
+      if (directRecord != null) {
+        addRecordCandidate(directRecord);
+      }
+      for (final attr in directAttributes) {
+        addAttributeCandidate(attr);
+      }
+      for (final rolo in directRolos) {
+        addRoloCandidate(rolo);
+      }
+    }
+
+    final asksAboutSelf = RegExp(r'\bmy\b', caseSensitive: false).hasMatch(query);
+    final ownerRecords = <Record>[];
+    final ownerAttributes = <Attribute>[];
+    if (asksAboutSelf && primaryUser != null) {
+      final ownerHints = <String>{
+        primaryUser.displayName.trim(),
+        if ((primaryUser.preferredName?.trim().isNotEmpty ?? false))
+          primaryUser.preferredName!.trim(),
+      };
+      final seenOwnerUris = <String>{};
+      for (final hint in ownerHints) {
+        if (hint.isEmpty) continue;
+        final candidates = await _recordRepository.searchByName(hint);
+        for (final candidate in candidates) {
+          if (_normalizeDisplayName(candidate.displayName) !=
+              _normalizeDisplayName(hint)) {
+            continue;
+          }
+          if (!seenOwnerUris.add(candidate.uri)) {
+            continue;
+          }
+          ownerRecords.add(candidate);
+          addRecordCandidate(candidate);
+          final attrs = await _attributeRepository.getByUri(candidate.uri);
+          for (final attr in attrs) {
+            ownerAttributes.add(attr);
+            addAttributeCandidate(attr);
+          }
+          final rolos = await _roloRepository.getByTargetUri(candidate.uri);
+          for (final rolo in rolos.take(8)) {
+            addRoloCandidate(rolo);
+          }
+          if (ownerRecords.length >= 2) {
+            break;
+          }
+        }
+        if (ownerRecords.length >= 2) {
+          break;
+        }
+      }
     }
 
     if (directRecord != null) {
@@ -885,6 +986,15 @@ class DojoService {
       contextLines.add(line);
       factLines.add(line);
       addSource(directRecord.uri, 'display_name');
+    }
+
+    if (asksAboutSelf && ownerRecords.isNotEmpty) {
+      for (final ownerRecord in ownerRecords.take(2)) {
+        final line = '- Owner record: ${ownerRecord.displayName} (${ownerRecord.uri})';
+        contextLines.add(line);
+        factLines.add(line);
+        addSource(ownerRecord.uri, 'display_name');
+      }
     }
 
     if (directAttributes.isNotEmpty) {
@@ -897,17 +1007,30 @@ class DojoService {
       }
     }
 
+    final relationshipAttrs = attributeCache.values
+        .where((attr) => attr.key == 'relationship_to_user')
+        .toList(growable: false);
+    for (final rel in relationshipAttrs.take(10)) {
+      final relatedRecord = recordCache[rel.subjectUri] ??
+          await _recordRepository.getByUri(rel.subjectUri);
+      if (relatedRecord != null) {
+        addRecordCandidate(relatedRecord);
+      }
+    }
+
+    final recordsByName = recordCache.values.toList(growable: false);
     if (recordsByName.isNotEmpty) {
-      for (final record in recordsByName.take(6)) {
+      for (final record in recordsByName.take(10)) {
         final line = '- Record match: ${record.displayName} (${record.uri})';
         contextLines.add(line);
         addSource(record.uri, 'display_name');
       }
     }
 
+    final attrsBySearch = attributeCache.values.toList(growable: false);
     if (attrsBySearch.isNotEmpty) {
       final seen = <String>{};
-      for (final attr in attrsBySearch) {
+      for (final attr in attrsBySearch.take(24)) {
         final key = '${attr.subjectUri}::${attr.key}';
         if (seen.contains(key)) continue;
         seen.add(key);
@@ -916,14 +1039,16 @@ class DojoService {
         contextLines.add(line);
         factLines.add(line);
         addSource(attr.subjectUri, attr.key);
-        if (seen.length >= 12) break;
+        if (seen.length >= 20) break;
       }
     }
 
+    final rolosBySearch = roloCache.values.toList(growable: false)
+      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
     if (directRolos.isNotEmpty || rolosBySearch.isNotEmpty) {
       final candidateRolos = <Rolo>[
         ...directRolos.take(4),
-        ...rolosBySearch.take(6),
+        ...rolosBySearch.take(10),
       ];
       final seenRoloIds = <String>{};
       var count = 0;
@@ -934,6 +1059,71 @@ class DojoService {
             '(${_formatRoloTime(rolo.timestamp)})';
         contextLines.add(line);
         if (++count >= 8) break;
+      }
+    }
+
+    String? directAnswer;
+    if (asksAboutSelf &&
+        (normalizedQuery.contains('address') || normalizedQuery == 'address')) {
+      Attribute? ownerAddress;
+      for (final attr in ownerAttributes) {
+        if (attr.key == 'address' &&
+            (attr.value?.trim().isNotEmpty ?? false)) {
+          ownerAddress = attr;
+          break;
+        }
+      }
+      if (ownerAddress == null) {
+        for (final attr in attrsBySearch) {
+          if (attr.key == 'address' &&
+              (attr.value?.trim().isNotEmpty ?? false)) {
+            ownerAddress = attr;
+            break;
+          }
+        }
+      }
+
+      if (ownerAddress != null && ownerAddress.value != null) {
+        directAnswer = 'Your address is ${ownerAddress.value}.';
+        addSource(ownerAddress.subjectUri, ownerAddress.key);
+      }
+    }
+
+    if (directAnswer == null) {
+      final relationshipTerm = _extractRelationshipTerm(normalizedQuery);
+      final asksForName = normalizedQuery.contains('name') ||
+          normalizedQuery.startsWith('who') ||
+          RegExp(r'\bwho\b').hasMatch(normalizedQuery);
+      if (relationshipTerm != null && asksForName) {
+        var relationshipFacts = attrsBySearch
+            .where((a) => a.key == 'relationship_to_user')
+            .toList(growable: false);
+        if (relationshipFacts.isEmpty) {
+          relationshipFacts =
+              await _attributeRepository.getByKey('relationship_to_user');
+        }
+        for (final rel in relationshipFacts) {
+          final value = (rel.value ?? '').toLowerCase();
+          if (!value.contains(relationshipTerm)) {
+            continue;
+          }
+          final relatedRecord = recordCache[rel.subjectUri] ??
+              await _recordRepository.getByUri(rel.subjectUri);
+          if (relatedRecord != null) {
+            addRecordCandidate(relatedRecord);
+          }
+          final relationshipLabel = relationshipTerm == 'fiancee'
+              ? 'fiancee'
+              : relationshipTerm;
+          directAnswer = relatedRecord != null
+              ? 'Your $relationshipLabel is ${relatedRecord.displayName}.'
+              : 'Your $relationshipLabel is ${rel.subjectUri}.';
+          addSource(rel.subjectUri, rel.key);
+          if (relatedRecord != null) {
+            addSource(relatedRecord.uri, 'display_name');
+          }
+          break;
+        }
       }
     }
 
@@ -948,6 +1138,7 @@ class DojoService {
       hasFacts: factLines.isNotEmpty,
       factsPreview: preview,
       sourcesUsed: sourcesUsed,
+      directAnswer: directAnswer,
     );
   }
 
@@ -996,11 +1187,14 @@ class DojoService {
     }
 
     var normalized = trimmed
+        .replaceAll(RegExp(r"[’']s\b"), '')
         .replaceAll(RegExp(r'^(what|who|where|when|why|how)\s+'), '')
         .replaceAll(RegExp(r'^(is|are|was|were|do|does|did|can|could)\s+'), '')
         .replaceAll(RegExp(r'^(tell me|show me|find|lookup|look up)\s+'), '')
+        .replaceAll(RegExp(r'\b(my|mine|me|please)\b'), ' ')
         .replaceAll(RegExp(r'\babout\b'), '')
         .replaceAll(RegExp(r'[^a-z0-9\s._-]'), ' ')
+        .replaceAll(RegExp(r'\bs\b'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
     if (normalized.isEmpty) {
@@ -1010,6 +1204,60 @@ class DojoService {
           .trim();
     }
     return normalized.isEmpty ? query.trim() : normalized;
+  }
+
+  List<String> _extractVaultSearchTerms(String normalizedQuery) {
+    final cleaned = normalizedQuery.trim().toLowerCase();
+    if (cleaned.isEmpty) {
+      return const [];
+    }
+
+    final tokens = cleaned
+        .split(RegExp(r'\s+'))
+        .map((token) => token.trim())
+        .where((token) => token.isNotEmpty)
+        .where((token) => !_vaultQueryStopWords.contains(token))
+        .toList(growable: false);
+
+    final ordered = <String>[];
+    final seen = <String>{};
+
+    void addTerm(String term) {
+      final value = term.trim();
+      if (value.isEmpty || !seen.add(value)) {
+        return;
+      }
+      ordered.add(value);
+    }
+
+    // Keep full normalized phrase first.
+    addTerm(cleaned);
+
+    for (final token in tokens) {
+      if (token.length >= 3 || token == 'ai' || token == 'id') {
+        addTerm(token);
+      }
+    }
+
+    if (tokens.length >= 2) {
+      for (var i = 0; i < tokens.length - 1; i++) {
+        final pair = '${tokens[i]} ${tokens[i + 1]}'.trim();
+        if (pair.length >= 5) {
+          addTerm(pair);
+        }
+      }
+    }
+
+    return ordered;
+  }
+
+  String? _extractRelationshipTerm(String normalizedQuery) {
+    for (final term in _relationshipTerms) {
+      if (RegExp('\\b$term\\b').hasMatch(normalizedQuery)) {
+        return term;
+      }
+    }
+    return null;
   }
 
   String _formatRoloTime(DateTime timestamp) {
@@ -1720,6 +1968,51 @@ class DojoService {
     'your',
   };
 
+  static const Set<String> _vaultQueryStopWords = <String>{
+    'a',
+    'an',
+    'and',
+    'are',
+    'at',
+    'be',
+    'can',
+    'did',
+    'do',
+    'does',
+    'for',
+    'from',
+    'how',
+    'i',
+    'in',
+    'is',
+    'it',
+    'me',
+    'mine',
+    'my',
+    'of',
+    'on',
+    'please',
+    'show',
+    'tell',
+    'the',
+    'to',
+    'was',
+    'what',
+    'where',
+    'who',
+    'why',
+    'with',
+  };
+
+  static const List<String> _relationshipTerms = <String>[
+    'girlfriend',
+    'boyfriend',
+    'wife',
+    'husband',
+    'partner',
+    'fiancee',
+  ];
+
   static const String _journalRecallSystemInstruction =
       'You are Sensei answering recall questions from journal context only. '
       'Do not invent facts. If missing, explicitly say the journal does not '
@@ -2151,11 +2444,13 @@ class _VaultContextBundle {
   final bool hasFacts;
   final String factsPreview;
   final List<String> sourcesUsed;
+  final String? directAnswer;
 
   const _VaultContextBundle({
     required this.context,
     required this.hasFacts,
     required this.factsPreview,
     required this.sourcesUsed,
+    this.directAnswer,
   });
 }
