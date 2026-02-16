@@ -125,6 +125,7 @@ class DojoService {
 
     // Parse the input — use active LLM provider if available, fall back to regex
     var parsed = _inputParser.parse(input);
+    var parsedFromLlm = false;
 
     if (!parsed.canCreateAttribute && _senseiLlm != null && _senseiLlm!.isReady) {
       // LLM may extract structure that regex missed
@@ -170,6 +171,7 @@ class DojoService {
           confidence: llmResult.confidence,
           originalText: input,
         );
+        parsedFromLlm = true;
       }
     }
 
@@ -201,43 +203,62 @@ class DojoService {
     String message;
 
     if (parsed.canCreateAttribute) {
+      final subjectUri = parsed.subjectUri!.toString();
+      final now = DateTime.now();
+
       // Check if record exists
-      final existingRecord = await _recordRepository.getByUri(
-        parsed.subjectUri!.toString(),
+      final existingRecord = await _recordRepository.getByUri(subjectUri);
+      final existingAttribute = await _attributeRepository.get(
+        subjectUri,
+        parsed.attributeKey!,
       );
+      final hasConflictingValue = existingAttribute?.value != null &&
+          !_valuesEquivalent(existingAttribute!.value!, parsed.attributeValue);
+      final shouldProtectExistingValue = parsedFromLlm &&
+          hasConflictingValue &&
+          !_isExplicitUpdateInput(input);
 
-      if (existingRecord == null) {
-        // Create new record
-        record = Record(
-          uri: parsed.subjectUri!.toString(),
-          displayName: parsed.subjectName!,
-          lastRoloId: roloId,
-          updatedAt: DateTime.now(),
-        );
-        await _recordRepository.upsert(record);
-        createdNewRecord = true;
+      if (shouldProtectExistingValue) {
+        record = existingRecord;
+        attribute = existingAttribute;
+        message = 'Existing ${_formatKey(parsed.attributeKey!)} for '
+            '${parsed.subjectName ?? subjectUri} is "${existingAttribute!.value}". '
+            'I did not overwrite it automatically. '
+            'Use an explicit update command or edit it in The Vault.';
       } else {
-        // Update existing record's last_rolo_id
-        record = existingRecord.copyWith(
+        if (existingRecord == null) {
+          // Create new record
+          record = Record(
+            uri: subjectUri,
+            displayName: parsed.subjectName!,
+            lastRoloId: roloId,
+            updatedAt: now,
+          );
+          await _recordRepository.upsert(record);
+          createdNewRecord = true;
+        } else {
+          // Update existing record's last_rolo_id
+          record = existingRecord.copyWith(
+            lastRoloId: roloId,
+            updatedAt: now,
+          );
+          await _recordRepository.upsert(record);
+        }
+
+        // Create/update the attribute
+        attribute = Attribute(
+          subjectUri: subjectUri,
+          key: parsed.attributeKey!,
+          value: parsed.attributeValue,
           lastRoloId: roloId,
-          updatedAt: DateTime.now(),
+          updatedAt: now,
         );
-        await _recordRepository.upsert(record);
+        await _attributeRepository.upsert(attribute);
+
+        message = createdNewRecord
+            ? 'Created ${parsed.subjectName} with ${_formatKey(parsed.attributeKey!)}: ${parsed.attributeValue}'
+            : 'Updated ${parsed.subjectName}\'s ${_formatKey(parsed.attributeKey!)} to ${parsed.attributeValue}';
       }
-
-      // Create/update the attribute
-      attribute = Attribute(
-        subjectUri: parsed.subjectUri!.toString(),
-        key: parsed.attributeKey!,
-        value: parsed.attributeValue,
-        lastRoloId: roloId,
-        updatedAt: DateTime.now(),
-      );
-      await _attributeRepository.upsert(attribute);
-
-      message = createdNewRecord
-          ? 'Created ${parsed.subjectName} with ${_formatKey(parsed.attributeKey!)}: ${parsed.attributeValue}'
-          : 'Updated ${parsed.subjectName}\'s ${_formatKey(parsed.attributeKey!)} to ${parsed.attributeValue}';
     } else if (parsed.isQuery) {
       message = await _answerQueryFromVault(
         query: input,
@@ -289,6 +310,98 @@ class DojoService {
 
     // Soft-delete the attribute
     return _attributeRepository.softDelete(subjectUri, key, roloId);
+  }
+
+  /// Manually updates an attribute value with an explicit audit Rolo.
+  Future<Attribute> updateAttributeValue({
+    required String subjectUri,
+    required String key,
+    required String value,
+  }) async {
+    final trimmedValue = value.trim();
+    if (trimmedValue.isEmpty) {
+      throw ArgumentError('Attribute value cannot be empty.');
+    }
+
+    final existing = await _attributeRepository.get(subjectUri, key);
+    if (existing == null) {
+      throw StateError('Attribute "$key" does not exist for $subjectUri.');
+    }
+
+    final normalizedExisting = existing.value?.trim() ?? '';
+    if (_valuesEquivalent(normalizedExisting, trimmedValue)) {
+      return existing;
+    }
+
+    final editLocation = await _locationService.getCurrentCoordinates();
+    final now = DateTime.now();
+    final roloId = _uuid.v4();
+    final rolo = Rolo(
+      id: roloId,
+      type: RoloType.input,
+      summoningText:
+          'Manual edit: $key for $subjectUri from "${existing.value ?? '(empty)'}" '
+          'to "$trimmedValue"',
+      targetUri: subjectUri,
+      metadata: RoloMetadata(
+        trigger: 'Manual_Edit',
+        location: editLocation,
+      ),
+      timestamp: now.toUtc(),
+    );
+    await _roloRepository.create(rolo);
+
+    final updated = existing.copyWith(
+      value: trimmedValue,
+      lastRoloId: roloId,
+      updatedAt: now,
+    );
+    await _attributeRepository.upsert(updated);
+    return updated;
+  }
+
+  /// Manually renames a record display name with an audit Rolo.
+  Future<Record> updateRecordDisplayName({
+    required String uri,
+    required String displayName,
+  }) async {
+    final trimmedName = displayName.trim();
+    if (trimmedName.isEmpty) {
+      throw ArgumentError('Display name cannot be empty.');
+    }
+
+    final existing = await _recordRepository.getByUri(uri);
+    if (existing == null) {
+      throw StateError('Record not found for uri "$uri".');
+    }
+    if (_valuesEquivalent(existing.displayName, trimmedName)) {
+      return existing;
+    }
+
+    final editLocation = await _locationService.getCurrentCoordinates();
+    final now = DateTime.now();
+    final roloId = _uuid.v4();
+    final rolo = Rolo(
+      id: roloId,
+      type: RoloType.input,
+      summoningText:
+          'Manual edit: rename "$uri" from "${existing.displayName}" to "$trimmedName"',
+      targetUri: uri,
+      metadata: RoloMetadata(
+        trigger: 'Manual_Edit',
+        location: editLocation,
+      ),
+      timestamp: now.toUtc(),
+    );
+    await _roloRepository.create(rolo);
+
+    final updated = existing.copyWith(
+      displayName: trimmedName,
+      lastRoloId: roloId,
+      updatedAt: now,
+    );
+    await _recordRepository.upsert(updated);
+    return updated;
   }
 
   /// Retrieves all attributes for a URI with their audit information.
@@ -1388,6 +1501,32 @@ class DojoService {
         .split('_')
         .map((w) => w.isEmpty ? '' : '${w[0].toUpperCase()}${w.substring(1)}')
         .join(' ');
+  }
+
+  bool _isExplicitUpdateInput(String input) {
+    final normalized = input.toLowerCase();
+    return normalized.contains(' set ') ||
+        normalized.startsWith('set ') ||
+        normalized.contains(' update ') ||
+        normalized.startsWith('update ') ||
+        normalized.contains(' change ') ||
+        normalized.startsWith('change ') ||
+        normalized.contains(' correct ') ||
+        normalized.startsWith('correct ') ||
+        normalized.contains(' replace ') ||
+        normalized.startsWith('replace ');
+  }
+
+  bool _valuesEquivalent(String? left, String? right) {
+    final normalizedLeft = (left ?? '')
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ');
+    final normalizedRight = (right ?? '')
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ');
+    return normalizedLeft == normalizedRight;
   }
 
   Future<RoloMetadata> _enrichMetadataWithLocation(RoloMetadata metadata) async {

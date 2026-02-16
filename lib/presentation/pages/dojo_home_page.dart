@@ -7,6 +7,7 @@ import '../../core/services/sensei_llm_service.dart';
 import '../../core/services/synthesis_service.dart';
 import '../../domain/entities/attribute.dart';
 import '../../domain/entities/journal_entry.dart';
+import '../../domain/entities/record.dart';
 import '../../domain/entities/rolo.dart';
 import '../widgets/flip_card.dart';
 import '../widgets/sensei_bar.dart';
@@ -995,14 +996,17 @@ class _DojoHomePageState extends State<DojoHomePage> {
   void _showVaultView(BuildContext context) async {
     final dojo = DojoProvider.of(context).dojoService;
     final provider = DojoProvider.of(context);
-    final records = await provider.recordRepository.getAll();
+    final fetchedRecords = await provider.recordRepository.getAll();
 
+    final recordsByUri = <String, Record>{
+      for (final record in fetchedRecords) record.uri: record,
+    };
     final recordAttributes = <String, List<Attribute>>{};
     final roloTexts = <String, String>{};
-    for (final record in records) {
+    for (final record in fetchedRecords) {
       final attrs = await dojo.getAttributes(record.uri);
       if (attrs.isNotEmpty) {
-        recordAttributes[record.uri] = attrs;
+        recordAttributes[record.uri] = [...attrs];
         // Load the source Rolo's summoning text for each attribute
         for (final attr in attrs) {
           if (!roloTexts.containsKey(attr.lastRoloId)) {
@@ -1026,66 +1030,270 @@ class _DojoHomePageState extends State<DojoHomePage> {
           top: Radius.circular(DojoDimens.cardRadius),
         ),
       ),
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.6,
-        minChildSize: 0.3,
-        maxChildSize: 0.9,
-        expand: false,
-        builder: (context, scrollController) => Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(DojoDimens.paddingMedium),
-              child: Row(
+      builder: (_) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            Future<void> editRecordDisplayName(String uri) async {
+              final current = recordsByUri[uri];
+              if (current == null) {
+                return;
+              }
+              final nextName = await _showVaultTextEditor(
+                context: context,
+                title: 'Edit Contact Name',
+                label: 'Display Name',
+                initialValue: current.displayName,
+                hintText: 'Enter full name',
+              );
+              if (nextName == null) {
+                return;
+              }
+
+              try {
+                final updated = await dojo.updateRecordDisplayName(
+                  uri: uri,
+                  displayName: nextName,
+                );
+                setSheetState(() {
+                  recordsByUri[uri] = updated;
+                });
+                if (mounted) {
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Record name updated'),
+                      backgroundColor: DojoColors.graphite,
+                    ),
+                  );
+                  unawaited(_loadRecentRolos());
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    SnackBar(
+                      content: Text('Unable to update record: $e'),
+                      backgroundColor: DojoColors.alert,
+                    ),
+                  );
+                }
+              }
+            }
+
+            Future<void> editAttribute(String uri, Attribute attribute) async {
+              final nextValue = await _showVaultTextEditor(
+                context: context,
+                title: 'Edit ${_formatKey(attribute.key)}',
+                label: 'Value',
+                initialValue: attribute.value ?? '',
+                hintText: 'Enter corrected value',
+              );
+              if (nextValue == null) {
+                return;
+              }
+
+              try {
+                final updated = await dojo.updateAttributeValue(
+                  subjectUri: uri,
+                  key: attribute.key,
+                  value: nextValue,
+                );
+                final rolo = await dojo.getRolo(updated.lastRoloId);
+                setSheetState(() {
+                  final attributes = recordAttributes[uri];
+                  if (attributes == null) {
+                    return;
+                  }
+                  final index = attributes.indexWhere((a) => a.key == updated.key);
+                  if (index >= 0) {
+                    attributes[index] = updated;
+                  }
+                  if (rolo != null) {
+                    roloTexts[updated.lastRoloId] = rolo.summoningText;
+                  }
+                });
+                if (mounted) {
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Attribute updated'),
+                      backgroundColor: DojoColors.graphite,
+                    ),
+                  );
+                  unawaited(_loadRecentRolos());
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    SnackBar(
+                      content: Text('Unable to update attribute: $e'),
+                      backgroundColor: DojoColors.alert,
+                    ),
+                  );
+                }
+              }
+            }
+
+            Future<void> deleteAttribute(String uri, Attribute attribute) async {
+              try {
+                await dojo.deleteAttribute(uri, attribute.key);
+                setSheetState(() {
+                  final attributes = recordAttributes[uri];
+                  if (attributes == null) {
+                    return;
+                  }
+                  attributes.removeWhere((a) => a.key == attribute.key);
+                  if (attributes.isEmpty) {
+                    recordAttributes.remove(uri);
+                  }
+                });
+                if (mounted) {
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    SnackBar(
+                      content: Text('Deleted ${_formatKey(attribute.key)}'),
+                      backgroundColor: DojoColors.graphite,
+                    ),
+                  );
+                  unawaited(_loadRecentRolos());
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    SnackBar(
+                      content: Text('Unable to delete attribute: $e'),
+                      backgroundColor: DojoColors.alert,
+                    ),
+                  );
+                }
+              }
+            }
+
+            final visibleRecords = fetchedRecords
+                .where((record) => (recordAttributes[record.uri]?.isNotEmpty ?? false))
+                .map((record) => recordsByUri[record.uri] ?? record)
+                .toList(growable: false);
+
+            return DraggableScrollableSheet(
+              initialChildSize: 0.6,
+              minChildSize: 0.3,
+              maxChildSize: 0.9,
+              expand: false,
+              builder: (context, scrollController) => Column(
                 children: [
-                  const Icon(Icons.folder, color: DojoColors.senseiGold),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'The Vault',
-                    style: TextStyle(
-                      color: DojoColors.textPrimary,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
+                  Padding(
+                    padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.folder, color: DojoColors.senseiGold),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'The Vault',
+                          style: TextStyle(
+                            color: DojoColors.textPrimary,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          '${visibleRecords.length} records',
+                          style: const TextStyle(
+                            color: DojoColors.textHint,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  const Spacer(),
-                  Text(
-                    '${records.length} records',
-                    style: const TextStyle(color: DojoColors.textHint, fontSize: 12),
+                  const Divider(color: DojoColors.border, height: 1),
+                  Expanded(
+                    child: visibleRecords.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No records yet',
+                              style: TextStyle(color: DojoColors.textHint),
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: scrollController,
+                            padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+                            itemCount: visibleRecords.length,
+                            itemBuilder: (context, index) {
+                              final record = visibleRecords[index];
+                              final attrs = recordAttributes[record.uri]!;
+                              return _VaultRecordCard(
+                                uri: record.uri,
+                                displayName: record.displayName,
+                                attributes: attrs,
+                                roloTexts: roloTexts,
+                                onEditRecord: () => editRecordDisplayName(record.uri),
+                                onEditAttribute: (attr) => editAttribute(record.uri, attr),
+                                onDeleteAttribute: (attr) => deleteAttribute(record.uri, attr),
+                              );
+                            },
+                          ),
                   ),
                 ],
               ),
-            ),
-            const Divider(color: DojoColors.border, height: 1),
-            Expanded(
-              child: recordAttributes.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No records yet',
-                        style: TextStyle(color: DojoColors.textHint),
-                      ),
-                    )
-                  : ListView.builder(
-                      controller: scrollController,
-                      padding: const EdgeInsets.all(DojoDimens.paddingMedium),
-                      itemCount: recordAttributes.length,
-                      itemBuilder: (context, index) {
-                        final uri = recordAttributes.keys.elementAt(index);
-                        final attrs = recordAttributes[uri]!;
-                        final record = records.firstWhere((r) => r.uri == uri);
+            );
+          },
+        );
+      },
+    );
+  }
 
-                        return _VaultRecordCard(
-                          uri: uri,
-                          displayName: record.displayName,
-                          attributes: attrs,
-                          roloTexts: roloTexts,
-                        );
-                      },
-                    ),
-            ),
-          ],
+  Future<String?> _showVaultTextEditor({
+    required BuildContext context,
+    required String title,
+    required String label,
+    required String initialValue,
+    String? hintText,
+  }) async {
+    final controller = TextEditingController(text: initialValue);
+    final submitted = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: DojoColors.graphite,
+        title: Text(
+          title,
+          style: const TextStyle(color: DojoColors.textPrimary),
         ),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: DojoColors.textPrimary),
+          decoration: InputDecoration(
+            labelText: label,
+            hintText: hintText,
+          ),
+          minLines: 1,
+          maxLines: 3,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.of(dialogContext).pop(controller.text.trim());
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: DojoColors.senseiGold,
+              foregroundColor: DojoColors.slate,
+            ),
+            child: const Text('Save'),
+          ),
+        ],
       ),
     );
+    controller.dispose();
+
+    if (submitted == null) {
+      return null;
+    }
+    final trimmed = submitted.trim();
+    if (trimmed.isEmpty || trimmed == initialValue.trim()) {
+      return null;
+    }
+    return trimmed;
   }
 
   Color _getTypeBadgeColor(RoloType type) {
@@ -1203,12 +1411,18 @@ class _VaultRecordCard extends StatelessWidget {
   final String displayName;
   final List<Attribute> attributes;
   final Map<String, String> roloTexts;
+  final Future<void> Function()? onEditRecord;
+  final Future<void> Function(Attribute attribute)? onEditAttribute;
+  final Future<void> Function(Attribute attribute)? onDeleteAttribute;
 
   const _VaultRecordCard({
     required this.uri,
     required this.displayName,
     required this.attributes,
     this.roloTexts = const {},
+    this.onEditRecord,
+    this.onEditAttribute,
+    this.onDeleteAttribute,
   });
 
   @override
@@ -1240,21 +1454,95 @@ class _VaultRecordCard extends StatelessWidget {
                     fontFamily: 'monospace',
                   ),
                 ),
+                if (onEditRecord != null) ...[
+                  const SizedBox(width: 4),
+                  IconButton(
+                    onPressed: () {
+                      final callback = onEditRecord;
+                      if (callback != null) {
+                        unawaited(callback());
+                      }
+                    },
+                    icon: const Icon(Icons.edit_outlined, size: 18),
+                    tooltip: 'Edit record name',
+                    color: DojoColors.textSecondary,
+                    splashRadius: 18,
+                  ),
+                ],
               ],
             ),
             const SizedBox(height: 8),
             const Divider(color: DojoColors.border, height: 1),
             const SizedBox(height: 8),
-            ...attributes.map((attr) => AttributeFlipCard(
-                  attributeKey: attr.key,
-                  attributeValue: attr.value,
-                  roloId: attr.lastRoloId,
-                  summoningText: roloTexts[attr.lastRoloId],
-                  timestamp: attr.updatedAt ?? DateTime.now(),
-                )),
+            ...attributes.map(
+              (attr) => Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: AttributeFlipCard(
+                      attributeKey: attr.key,
+                      attributeValue: attr.value,
+                      roloId: attr.lastRoloId,
+                      summoningText: roloTexts[attr.lastRoloId],
+                      timestamp: attr.updatedAt ?? DateTime.now(),
+                    ),
+                  ),
+                  if (onEditAttribute != null || onDeleteAttribute != null)
+                    PopupMenuButton<_VaultAttributeAction>(
+                      icon: const Icon(
+                        Icons.more_vert,
+                        color: DojoColors.textHint,
+                      ),
+                      color: DojoColors.graphite,
+                      onSelected: (action) {
+                        if (action == _VaultAttributeAction.edit) {
+                          final callback = onEditAttribute;
+                          if (callback != null) {
+                            unawaited(callback(attr));
+                          }
+                          return;
+                        }
+
+                        final callback = onDeleteAttribute;
+                        if (callback != null) {
+                          unawaited(callback(attr));
+                        }
+                      },
+                      itemBuilder: (context) {
+                        final items = <PopupMenuEntry<_VaultAttributeAction>>[];
+                        if (onEditAttribute != null) {
+                          items.add(
+                            const PopupMenuItem(
+                              value: _VaultAttributeAction.edit,
+                              child: Text(
+                                'Edit value',
+                                style: TextStyle(color: DojoColors.textPrimary),
+                              ),
+                            ),
+                          );
+                        }
+                        if (onDeleteAttribute != null) {
+                          items.add(
+                            const PopupMenuItem(
+                              value: _VaultAttributeAction.delete,
+                              child: Text(
+                                'Delete',
+                                style: TextStyle(color: DojoColors.alert),
+                              ),
+                            ),
+                          );
+                        }
+                        return items;
+                      },
+                    ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 }
+
+enum _VaultAttributeAction { edit, delete }
