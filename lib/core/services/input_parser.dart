@@ -91,6 +91,29 @@ class InputParser {
       ),
     ),
 
+    // "[Name] lives at [address]"
+    _PatternMatcher(
+      RegExp(r"^(.+?)\s+(?:lives?|resides?)\s+at\s+(.+)$", caseSensitive: false),
+      (match) => (
+        subject: match.group(1)!.trim(),
+        key: 'address',
+        value: match.group(2)!.trim(),
+      ),
+    ),
+
+    // "Address for [Name] is [address]"
+    _PatternMatcher(
+      RegExp(
+        r"^address\s+for\s+(.+?)\s*(?:is|:)\s+(.+)$",
+        caseSensitive: false,
+      ),
+      (match) => (
+        subject: match.group(1)!.trim(),
+        key: 'address',
+        value: match.group(2)!.trim(),
+      ),
+    ),
+
     // "[Name] [attribute] is [value]"
     _PatternMatcher(
       RegExp(r"^(.+?)\s+(.+?)\s+is\s+(.+)$", caseSensitive: false),

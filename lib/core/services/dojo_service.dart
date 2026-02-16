@@ -117,10 +117,13 @@ class DojoService {
   Future<SummoningResult> processSummoning(
     String input, {
     RoloMetadata metadata = RoloMetadata.empty,
+    bool persistSenseiResponse = true,
+    String? fallbackTargetUri,
+    UserProfile? primaryUser,
   }) async {
     // Every user summoning should capture the device coordinates when possible.
     final enrichedMetadata = await _enrichMetadataWithLocation(metadata);
-    final primaryUser = await _getPrimaryUserProfile();
+    final resolvedPrimaryUser = primaryUser ?? await _getPrimaryUserProfile();
 
     // Parse every input through Sensei (LLM-first with vault context).
     final parserFallback = _inputParser.parse(input);
@@ -131,7 +134,7 @@ class DojoService {
       final parsingContext = await _buildLlmParsingContext(
         input: input,
         parserFallback: parserFallback,
-        primaryUser: primaryUser,
+        primaryUser: resolvedPrimaryUser,
       );
       final llmExtraction = await _senseiLlm!.parseInput(
         input,
@@ -176,7 +179,7 @@ class DojoService {
       id: roloId,
       type: parsed.isQuery ? RoloType.request : RoloType.input,
       summoningText: input,
-      targetUri: parsed.subjectUri?.toString(),
+      targetUri: parsed.subjectUri?.toString() ?? fallbackTargetUri,
       metadata: RoloMetadata(
         trigger: enrichedMetadata.trigger ?? 'Manual_Entry',
         confidenceScore: parsed.confidence,
@@ -268,18 +271,20 @@ class DojoService {
       message = await _answerQueryFromVault(
         query: input,
         parsed: parsed,
-        primaryUser: primaryUser,
+        primaryUser: resolvedPrimaryUser,
       );
     } else {
       message = 'Input recorded. Unable to extract structured data.';
     }
 
-    await _persistSenseiResponse(
-      inputRoloId: roloId,
-      targetUri: parsed.subjectUri?.toString(),
-      responseText: message,
-      confidenceScore: parsed.confidence,
-    );
+    if (persistSenseiResponse) {
+      await _persistSenseiResponse(
+        inputRoloId: roloId,
+        targetUri: rolo.targetUri,
+        responseText: message,
+        confidenceScore: parsed.confidence,
+      );
+    }
 
     return SummoningResult(
       rolo: rolo,
@@ -457,29 +462,25 @@ class DojoService {
     }
 
     final primaryUser = await _getPrimaryUserProfile();
-    final now = DateTime.now();
-    final dayKey = _journalDayKey(now);
-    final enrichedMetadata = await _enrichMetadataWithLocation(
-      const RoloMetadata(trigger: 'Journal_Entry'),
+    final vaultSummoning = await processSummoning(
+      trimmed,
+      metadata: const RoloMetadata(trigger: 'Journal_Entry'),
+      persistSenseiResponse: false,
+      fallbackTargetUri: _journalTargetUri(DateTime.now()),
+      primaryUser: primaryUser,
     );
-
-    final roloId = _uuid.v4();
-    final rolo = Rolo(
-      id: roloId,
-      type: RoloType.input,
-      summoningText: trimmed,
-      targetUri: _journalTargetUri(now),
-      metadata: RoloMetadata(
-        trigger: enrichedMetadata.trigger ?? 'Journal_Entry',
-        confidenceScore: 0.92,
-        location: enrichedMetadata.location,
-        weather: enrichedMetadata.weather,
-        sourceId: enrichedMetadata.sourceId,
-        sourceDevice: enrichedMetadata.sourceDevice,
-      ),
-      timestamp: now.toUtc(),
-    );
-    await _roloRepository.create(rolo);
+    final rolo = vaultSummoning.rolo;
+    final dayKey = _journalDayKey(rolo.timestamp);
+    final userEntryMetadata = <String, dynamic>{
+      ..._journalMetadataFromRolo(rolo.metadata),
+      if (vaultSummoning.record != null)
+        'vault_record_uri': vaultSummoning.record!.uri,
+      if (vaultSummoning.attribute != null)
+        'vault_attribute_key': vaultSummoning.attribute!.key,
+      if (vaultSummoning.attribute != null)
+        'vault_attribute_value': vaultSummoning.attribute!.value,
+      'vault_augmented': vaultSummoning.attribute != null,
+    };
 
     final userEntry = JournalEntry(
       id: _uuid.v4(),
@@ -487,15 +488,15 @@ class DojoService {
       role: JournalRole.user,
       entryType: JournalEntryType.partial,
       content: trimmed,
-      sourceRoloId: roloId,
-      metadata: _journalMetadataFromRolo(enrichedMetadata),
-      createdAt: now.toUtc(),
+      sourceRoloId: rolo.id,
+      metadata: userEntryMetadata,
+      createdAt: rolo.timestamp,
     );
     if (_journalRepository != null) {
       await _journalRepository!.create(userEntry);
     }
 
-    final dayEntries = await getJournalEntriesForDate(now, limit: 500);
+    final dayEntries = await getJournalEntriesForDate(rolo.timestamp, limit: 500);
     final sourceEntries = dayEntries.isEmpty
         ? <JournalEntry>[userEntry]
         : dayEntries;
@@ -504,13 +505,13 @@ class DojoService {
     late final String responseText;
     if (responseType == JournalEntryType.dailySummary) {
       responseText = await _buildDailySummaryBlock(
-        now,
+        rolo.timestamp,
         requestPrompt: trimmed,
         primaryUser: primaryUser,
       );
     } else if (responseType == JournalEntryType.weeklySummary) {
       responseText = await _buildWeeklySummaryBlock(
-        now,
+        rolo.timestamp,
         requestPrompt: trimmed,
         primaryUser: primaryUser,
       );
@@ -534,7 +535,7 @@ class DojoService {
       role: JournalRole.sensei,
       entryType: responseType,
       content: responseText,
-      sourceRoloId: roloId,
+      sourceRoloId: rolo.id,
       metadata: {
         'mode': 'journal',
         'response_type': responseType.value,
@@ -546,7 +547,7 @@ class DojoService {
     }
 
     await _persistSenseiResponse(
-      inputRoloId: roloId,
+      inputRoloId: rolo.id,
       targetUri: rolo.targetUri,
       responseText: responseText,
       confidenceScore: 0.88,
