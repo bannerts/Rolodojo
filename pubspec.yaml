@@ -18,6 +18,9 @@ dependencies:
   # Zero-Cloud policy: all inference runs on-device
   fllama: ^0.5.0
 
+  # Encryption (AES-256-CBC for backup files)
+  encrypt: ^5.0.3
+
   # Utilities
   uuid: ^4.2.2
   path: ^1.8.3

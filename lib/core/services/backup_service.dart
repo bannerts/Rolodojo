@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
+import 'package:encrypt/encrypt.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 import '../../data/models/attribute_model.dart';
@@ -359,22 +359,22 @@ class BackupService {
 
   /// Encrypts plaintext using AES-256-CBC derived from the master key.
   ///
-  /// Format: [16-byte IV][encrypted data]
-  /// The master key from Secure Storage is hashed to derive the AES key.
+  /// Format: [16-byte IV][AES-256-CBC encrypted data]
+  /// The master key from Secure Storage is derived into a 32-byte AES key.
   Future<Uint8List> _encrypt(String plaintext) async {
     final masterKey = await _securityService.getMasterKey();
-    final keyBytes = _deriveKey(masterKey);
-    final iv = _generateIv();
-    final plaintextBytes = utf8.encode(plaintext);
+    final key = crypto.Key(Uint8List.fromList(
+      _deriveKey(utf8.encode(masterKey)),
+    ));
+    final iv = crypto.IV.fromSecureRandom(16);
 
-    // XOR-based encryption using the derived key and IV
-    // This provides real encryption tied to the device's master key
-    final encrypted = _xorCrypt(plaintextBytes, keyBytes, iv);
+    final encrypter = crypto.Encrypter(crypto.AES(key, mode: crypto.AESMode.cbc));
+    final encrypted = encrypter.encryptBytes(utf8.encode(plaintext), iv: iv);
 
     // Prepend IV to encrypted data
-    final result = Uint8List(16 + encrypted.length);
-    result.setRange(0, 16, iv);
-    result.setRange(16, result.length, encrypted);
+    final result = Uint8List(16 + encrypted.bytes.length);
+    result.setRange(0, 16, iv.bytes);
+    result.setRange(16, result.length, encrypted.bytes);
     return result;
   }
 
@@ -385,43 +385,28 @@ class BackupService {
     }
 
     final masterKey = await _securityService.getMasterKey();
-    final keyBytes = _deriveKey(masterKey);
-    final iv = encryptedData.sublist(0, 16);
+    final key = crypto.Key(Uint8List.fromList(
+      _deriveKey(utf8.encode(masterKey)),
+    ));
+    final iv = crypto.IV(encryptedData.sublist(0, 16));
     final ciphertext = encryptedData.sublist(16);
 
-    final decrypted = _xorCrypt(ciphertext, keyBytes, iv);
+    final encrypter = crypto.Encrypter(crypto.AES(key, mode: crypto.AESMode.cbc));
+    final decrypted = encrypter.decryptBytes(crypto.Encrypted(ciphertext), iv: iv);
     return utf8.decode(decrypted);
   }
 
-  /// Derives a 32-byte key from the master key string.
-  Uint8List _deriveKey(String masterKey) {
-    final keyBytes = utf8.encode(masterKey);
+  /// Derives a 32-byte AES key from the master key bytes.
+  ///
+  /// Uses a simple but deterministic key derivation to produce
+  /// a 32-byte key suitable for AES-256.
+  List<int> _deriveKey(List<int> keyBytes) {
     final derived = Uint8List(32);
     for (var i = 0; i < 32; i++) {
       derived[i] = keyBytes[i % keyBytes.length];
-      // Mix bytes for better key distribution
       derived[i] ^= keyBytes[(i * 7 + 13) % keyBytes.length];
       derived[i] = (derived[i] + i) & 0xFF;
     }
     return derived;
-  }
-
-  /// Generates a random 16-byte IV.
-  Uint8List _generateIv() {
-    final random = Random.secure();
-    return Uint8List.fromList(
-      List.generate(16, (_) => random.nextInt(256)),
-    );
-  }
-
-  /// XOR-based stream cipher using key and IV.
-  Uint8List _xorCrypt(List<int> data, Uint8List key, List<int> iv) {
-    final result = Uint8List(data.length);
-    for (var i = 0; i < data.length; i++) {
-      final keyByte = key[i % key.length];
-      final ivByte = iv[i % iv.length];
-      result[i] = data[i] ^ keyByte ^ ivByte ^ ((i * 37) & 0xFF);
-    }
-    return result;
   }
 }

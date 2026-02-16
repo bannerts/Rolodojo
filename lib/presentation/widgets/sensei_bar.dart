@@ -56,6 +56,7 @@ class _SenseiBarState extends State<SenseiBar>
     _pulseAnimation = Tween<double>(begin: 0.8, end: 1.0).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+    _updatePulseAnimation();
   }
 
   @override

@@ -66,12 +66,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
         await _loadRecentRolos();
 
         // Check for synthesis suggestions from the new Rolo
-        final provider = DojoProvider.of(context);
-        final synthesisService = SynthesisService(
-          roloRepository: provider.roloRepository,
-          recordRepository: provider.recordRepository,
-          attributeRepository: provider.attributeRepository,
-        );
+        final synthesisService = DojoProvider.of(context).synthesisService;
         final suggestions = await synthesisService.analyzeRolo(result.rolo);
         if (mounted && suggestions.isNotEmpty) {
           setState(() {

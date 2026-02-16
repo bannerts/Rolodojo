@@ -38,7 +38,7 @@ class AttributeModel extends Attribute {
       subjectUri: map['subject_uri'] as String,
       key: map['attr_key'] as String,
       value: map['attr_value'] as String?,
-      lastRoloId: map['last_rolo_id'] as String,
+      lastRoloId: (map['last_rolo_id'] as String?) ?? '',
       isEncrypted: (map['is_encrypted'] as int?) == 1,
       updatedAt: updatedAt,
     );

@@ -40,20 +40,22 @@ class Attribute {
   Attribute copyWith({
     String? subjectUri,
     String? key,
-    String? value,
+    Object? value = _sentinel,
     String? lastRoloId,
     bool? isEncrypted,
-    DateTime? updatedAt,
+    Object? updatedAt = _sentinel,
   }) {
     return Attribute(
       subjectUri: subjectUri ?? this.subjectUri,
       key: key ?? this.key,
-      value: value ?? this.value,
+      value: value == _sentinel ? this.value : value as String?,
       lastRoloId: lastRoloId ?? this.lastRoloId,
       isEncrypted: isEncrypted ?? this.isEncrypted,
-      updatedAt: updatedAt ?? this.updatedAt,
+      updatedAt: updatedAt == _sentinel ? this.updatedAt : updatedAt as DateTime?,
     );
   }
+
+  static const Object _sentinel = Object();
 
   /// Creates a soft-deleted version of this attribute.
   ///

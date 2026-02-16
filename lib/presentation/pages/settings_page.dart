@@ -411,9 +411,10 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           ElevatedButton(
             onPressed: () async {
+              // Capture provider before popping the dialog (context becomes invalid after pop)
+              final provider = DojoProvider.of(this.context);
               Navigator.pop(context);
               try {
-                final provider = DojoProvider.of(context);
                 final optimizationService = OptimizationService(
                   roloRepository: provider.roloRepository,
                 );
