@@ -489,6 +489,9 @@ class DojoService {
       throw ArgumentError('Journal input cannot be empty.');
     }
 
+    final primaryUser = _userRepository != null
+        ? await _userRepository!.getPrimary()
+        : null;
     final now = DateTime.now();
     final dayKey = _journalDayKey(now);
     final enrichedMetadata = await _enrichMetadataWithLocation(
