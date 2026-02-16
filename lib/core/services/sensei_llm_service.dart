@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../utils/uri_utils.dart';
 import 'input_parser.dart';
@@ -185,6 +186,7 @@ abstract class SenseiLlmService {
   LlmProvider get currentProvider;
   List<LlmProvider> get supportedProviders;
   ValueListenable<LlmHealthStatus> get healthStatus;
+  bool isApiKeyConfigured(LlmProvider provider);
 
   Future<void> initialize({
     required String modelPath,
@@ -193,6 +195,7 @@ abstract class SenseiLlmService {
   });
 
   Future<void> selectProvider(LlmProvider provider);
+  Future<void> setApiKey(LlmProvider provider, String apiKey);
   Future<LlmHealthStatus> checkHealth({bool force = false});
 
   Future<LlmExtraction> parseInput(
@@ -221,6 +224,9 @@ abstract class SenseiLlmService {
 /// If the active provider is unhealthy, Sensei falls back to deterministic
 /// parser logic and keeps the Dojo functional.
 class LocalLlmService implements SenseiLlmService {
+  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const String _apiKeyStoragePrefix = 'sensei_provider_api_key_';
+
   LocalLlmService({
     LlmProvider initialProvider = LlmProvider.localLlama,
     String localBaseUrl = 'http://localhost:11434/v1',
@@ -334,11 +340,21 @@ class LocalLlmService implements SenseiLlmService {
   ValueListenable<LlmHealthStatus> get healthStatus => _healthStatusNotifier;
 
   @override
+  bool isApiKeyConfigured(LlmProvider provider) {
+    if (provider.isLocal) {
+      return true;
+    }
+    final config = _providerConfigs[provider];
+    return config != null && config.hasApiKey;
+  }
+
+  @override
   Future<void> initialize({
     required String modelPath,
     int contextSize = 2048,
     int threads = 4,
   }) async {
+    await _hydrateApiKeysFromStorage();
     debugPrint(
       '[Sensei LLM] Initializing provider=${_currentProvider.label} '
       'endpoint=$baseUrl configuredModel=$configuredModelName marker=$modelPath',
@@ -358,6 +374,34 @@ class LocalLlmService implements SenseiLlmService {
     _lastHealthProvider = null;
     debugPrint('[Sensei LLM] Provider switched to ${provider.label}');
     await checkHealth(force: true);
+  }
+
+  @override
+  Future<void> setApiKey(LlmProvider provider, String apiKey) async {
+    if (!provider.requiresApiKey) {
+      return;
+    }
+
+    final config = _providerConfigs[provider];
+    if (config == null) {
+      return;
+    }
+
+    final sanitized = apiKey.trim();
+    config.apiKey = sanitized;
+
+    final storageKey = _apiKeyStorageKey(provider);
+    if (sanitized.isEmpty) {
+      await _secureStorage.delete(key: storageKey);
+    } else {
+      await _secureStorage.write(key: storageKey, value: sanitized);
+    }
+
+    _lastHealthCheck = null;
+    _lastHealthProvider = null;
+    if (_currentProvider == provider) {
+      await checkHealth(force: true);
+    }
   }
 
   @override
@@ -571,7 +615,9 @@ class LocalLlmService implements SenseiLlmService {
       activeModel: null,
       availableModels: const [],
       message:
-          '${provider.label} is selected but API key is missing. Set ${provider.apiKeyEnvVar}.',
+          '${provider.label} is selected but API key is missing. '
+          'Add it in Settings > LLM Provider > Credentials or set '
+          '${provider.apiKeyEnvVar}.',
       checkedAt: now,
     );
   }
@@ -1133,6 +1179,36 @@ class LocalLlmService implements SenseiLlmService {
     await checkHealth(force: true);
   }
 
+  Future<void> _hydrateApiKeysFromStorage() async {
+    for (final provider in LlmProvider.values) {
+      if (!provider.requiresApiKey) {
+        continue;
+      }
+      final config = _providerConfigs[provider];
+      if (config == null) {
+        continue;
+      }
+
+      try {
+        final storedKey = await _secureStorage.read(
+          key: _apiKeyStorageKey(provider),
+        );
+        final sanitized = storedKey?.trim() ?? '';
+        if (sanitized.isNotEmpty) {
+          config.apiKey = sanitized;
+        }
+      } catch (e) {
+        debugPrint(
+          '[Sensei LLM] Failed to read stored API key for ${provider.label}: $e',
+        );
+      }
+    }
+  }
+
+  String _apiKeyStorageKey(LlmProvider provider) {
+    return '$_apiKeyStoragePrefix${provider.id}';
+  }
+
   String _buildExtractionPrompt(String input, LlmParsingContext context) {
     final contextBlock = _buildContextBlock(context);
     return '''Extract structured data from this input.
@@ -1404,10 +1480,10 @@ If extraction is uncertain, lower confidence and keep fields null.''';
 class _ProviderConfig {
   final Uri baseUri;
   final String configuredModel;
-  final String apiKey;
+  String apiKey;
   final List<String> fallbackModels;
 
-  const _ProviderConfig({
+  _ProviderConfig({
     required this.baseUri,
     required this.configuredModel,
     required this.apiKey,
