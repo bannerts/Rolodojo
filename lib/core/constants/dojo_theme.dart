@@ -68,7 +68,7 @@ class DojoTheme {
         secondary: DojoColors.senseiGold,
         error: DojoColors.alert,
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: DojoColors.graphite,
         elevation: 0,
         shape: RoundedRectangleBorder(
