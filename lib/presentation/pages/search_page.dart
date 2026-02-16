@@ -22,7 +22,6 @@ class SearchPage extends StatefulWidget {
 class _SearchPageState extends State<SearchPage> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
-  final InputParser _parser = InputParser();
 
   List<SearchResult> _results = [];
   bool _isSearching = false;
