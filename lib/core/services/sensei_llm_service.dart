@@ -209,6 +209,15 @@ abstract class SenseiLlmService {
     List<String> recentRolos = const [],
   });
 
+  /// Answers a user question using supplied vault context.
+  ///
+  /// The model must stay grounded in [vaultContext] and avoid fabricating data.
+  Future<String> answerWithVault({
+    required String question,
+    required String vaultContext,
+    String? userProfileSummary,
+  });
+
   Future<String> summarize(String text, {int maxLength = 50});
   Future<void> dispose();
 }
@@ -702,6 +711,45 @@ class LocalLlmService implements SenseiLlmService {
         confidence: 0.65,
         inferenceTimeMs: stopwatch.elapsedMilliseconds,
       );
+    }
+  }
+
+  @override
+  Future<String> answerWithVault({
+    required String question,
+    required String vaultContext,
+    String? userProfileSummary,
+  }) async {
+    final trimmedQuestion = question.trim();
+    if (trimmedQuestion.isEmpty) {
+      return 'Please ask a question.';
+    }
+
+    final context = vaultContext.trim();
+    final health = await checkHealth();
+    if (!health.isHealthy) {
+      return _ruleBasedVaultAnswer(trimmedQuestion, context);
+    }
+
+    try {
+      final answer = await _createCompletion(
+        systemPrompt: '$_senseiCorePrompt\n$_qaSystemPrompt',
+        userPrompt: _buildVaultQaPrompt(
+          question: trimmedQuestion,
+          vaultContext: context,
+          userProfileSummary: userProfileSummary,
+        ),
+        maxTokens: 280,
+        temperature: 0.2,
+      );
+      final normalized = answer.trim();
+      if (normalized.isEmpty) {
+        return _ruleBasedVaultAnswer(trimmedQuestion, context);
+      }
+      return normalized;
+    } catch (e) {
+      await _onRequestFailure(e);
+      return _ruleBasedVaultAnswer(trimmedQuestion, context);
     }
   }
 
@@ -1274,6 +1322,13 @@ If extraction is uncertain, lower confidence and keep fields null.''';
   static const _synthesisSystemPrompt =
       'Generate one concise, factual insight from provided ledger facts.';
 
+  static const _qaSystemPrompt = '''You are Sensei answering vault-grounded questions.
+Rules:
+- Treat the vault context as your only source of truth.
+- Do not invent facts not present in the context.
+- If information is missing, explicitly say it is not found in the vault.
+- Keep answers direct and practical.''';
+
   static const _summarySystemPrompt =
       'Summarize briefly without adding unverified details.';
 
@@ -1402,12 +1457,57 @@ If extraction is uncertain, lower confidence and keep fields null.''';
         'Return one concise insight sentence only.';
   }
 
+  String _buildVaultQaPrompt({
+    required String question,
+    required String vaultContext,
+    String? userProfileSummary,
+  }) {
+    final profile = userProfileSummary?.trim();
+    final profileLine = (profile == null || profile.isEmpty)
+        ? 'User profile: unavailable'
+        : 'User profile: $profile';
+    final contextBlock = vaultContext.isEmpty
+        ? 'Vault context:\n- No matching vault facts were found.'
+        : 'Vault context:\n$vaultContext';
+
+    return '$profileLine\n\n'
+        '$contextBlock\n\n'
+        'Question: "$question"\n\n'
+        'Instructions:\n'
+        '- Answer using vault context only.\n'
+        '- If the answer is missing, explicitly say it is not in the vault.\n'
+        '- Cite key facts from the vault context in plain text.\n'
+        '- Be concise and useful.';
+  }
+
   String _ruleBasedSummary(String text, int maxLength) {
     final firstSentence = text.split(RegExp(r'[.!?]')).first.trim();
     if (firstSentence.length <= maxLength) {
       return firstSentence;
     }
     return '${firstSentence.substring(0, maxLength - 3)}...';
+  }
+
+  String _ruleBasedVaultAnswer(String question, String vaultContext) {
+    if (vaultContext.isEmpty ||
+        vaultContext.toLowerCase().contains('no matching vault facts')) {
+      return 'I could not find that in the vault yet. '
+          'Try adding the fact first, then ask again.';
+    }
+
+    final lines = vaultContext
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty && line.startsWith('-'))
+        .take(4)
+        .toList(growable: false);
+    if (lines.isEmpty) {
+      return 'I found related vault entries, but not enough structure to answer '
+          'that confidently. Please ask with a specific name or attribute.';
+    }
+
+    final facts = lines.join('\n');
+    return 'Here is what I found in your vault relevant to "$question":\n$facts';
   }
 
   LlmExtraction _pickBestExtraction(

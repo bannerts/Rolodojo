@@ -239,7 +239,11 @@ class DojoService {
           ? 'Created ${parsed.subjectName} with ${_formatKey(parsed.attributeKey!)}: ${parsed.attributeValue}'
           : 'Updated ${parsed.subjectName}\'s ${_formatKey(parsed.attributeKey!)} to ${parsed.attributeValue}';
     } else if (parsed.isQuery) {
-      message = 'Query received. Searching the Vault...';
+      message = await _answerQueryFromVault(
+        query: input,
+        parsed: parsed,
+        primaryUser: primaryUser,
+      );
     } else {
       message = 'Input recorded. Unable to extract structured data.';
     }
@@ -555,6 +559,168 @@ class DojoService {
   /// Searches records by name.
   Future<List<Record>> searchRecords(String query) async {
     return _recordRepository.searchByName(query);
+  }
+
+  Future<String> _answerQueryFromVault({
+    required String query,
+    required ParsedInput parsed,
+    required UserProfile? primaryUser,
+  }) async {
+    final bundle = await _buildVaultContextBundle(
+      query: query,
+      parsed: parsed,
+    );
+
+    if (_senseiLlm != null) {
+      try {
+        final llmAnswer = await _senseiLlm!.answerWithVault(
+          question: query,
+          vaultContext: bundle.context,
+          userProfileSummary: _buildUserProfileSummary(primaryUser),
+        );
+        final normalized = llmAnswer.trim();
+        if (normalized.isNotEmpty) {
+          return normalized;
+        }
+      } catch (e) {
+        debugPrint('[DojoService] Query answer via LLM failed: $e');
+      }
+    }
+
+    if (!bundle.hasFacts) {
+      return 'I searched your vault but could not find enough related facts '
+          'for that question yet.';
+    }
+
+    return 'I found related vault facts, but could not produce a complete '
+        'answer right now. Relevant entries:\n${bundle.factsPreview}';
+  }
+
+  Future<_VaultContextBundle> _buildVaultContextBundle({
+    required String query,
+    required ParsedInput parsed,
+  }) async {
+    final normalizedQuery = _normalizeQueryForVaultSearch(query);
+    final contextLines = <String>[];
+    final factLines = <String>[];
+
+    final recordsByName = await _recordRepository.searchByName(normalizedQuery);
+    final attrsBySearch = await _attributeRepository.search(normalizedQuery);
+    final rolosBySearch = await _roloRepository.search(normalizedQuery);
+
+    Record? directRecord;
+    List<Attribute> directAttributes = const [];
+    List<Rolo> directRolos = const [];
+    if (parsed.subjectUri != null) {
+      final subjectUri = parsed.subjectUri!.toString();
+      directRecord = await _recordRepository.getByUri(subjectUri);
+      directAttributes = await _attributeRepository.getByUri(subjectUri);
+      directRolos = await _roloRepository.getByTargetUri(subjectUri);
+    }
+
+    if (directRecord != null) {
+      final line = '- Direct record: ${directRecord.displayName} '
+          '(${directRecord.uri})';
+      contextLines.add(line);
+      factLines.add(line);
+    }
+
+    if (directAttributes.isNotEmpty) {
+      for (final attr in directAttributes.take(10)) {
+        final line = '- Fact: ${attr.subjectUri}.${attr.key} = '
+            '${_truncateForPrompt(attr.value ?? '(deleted)', 120)}';
+        contextLines.add(line);
+        factLines.add(line);
+      }
+    }
+
+    if (recordsByName.isNotEmpty) {
+      for (final record in recordsByName.take(6)) {
+        final line = '- Record match: ${record.displayName} (${record.uri})';
+        contextLines.add(line);
+      }
+    }
+
+    if (attrsBySearch.isNotEmpty) {
+      final seen = <String>{};
+      for (final attr in attrsBySearch) {
+        final key = '${attr.subjectUri}::${attr.key}';
+        if (seen.contains(key)) continue;
+        seen.add(key);
+        final line = '- Vault fact: ${attr.subjectUri}.${attr.key} = '
+            '${_truncateForPrompt(attr.value ?? '(deleted)', 120)}';
+        contextLines.add(line);
+        factLines.add(line);
+        if (seen.length >= 12) break;
+      }
+    }
+
+    if (directRolos.isNotEmpty || rolosBySearch.isNotEmpty) {
+      final candidateRolos = <Rolo>[
+        ...directRolos.take(4),
+        ...rolosBySearch.take(6),
+      ];
+      final seenRoloIds = <String>{};
+      var count = 0;
+      for (final rolo in candidateRolos) {
+        if (seenRoloIds.contains(rolo.id)) continue;
+        seenRoloIds.add(rolo.id);
+        final line = '- Ledger note: ${_truncateForPrompt(rolo.summoningText, 140)} '
+            '(${_formatRoloTime(rolo.timestamp)})';
+        contextLines.add(line);
+        if (++count >= 8) break;
+      }
+    }
+
+    if (contextLines.isEmpty) {
+      contextLines.add('- No matching vault facts were found.');
+    }
+
+    final preview = factLines.take(4).join('\n');
+    return _VaultContextBundle(
+      context: contextLines.join('\n'),
+      hasFacts: factLines.isNotEmpty,
+      factsPreview: preview,
+    );
+  }
+
+  String _truncateForPrompt(String text, int maxLength) {
+    if (text.length <= maxLength) {
+      return text;
+    }
+    return '${text.substring(0, maxLength - 3)}...';
+  }
+
+  String _normalizeQueryForVaultSearch(String query) {
+    final trimmed = query.trim().toLowerCase();
+    if (trimmed.isEmpty) {
+      return query;
+    }
+
+    var normalized = trimmed
+        .replaceAll(RegExp(r'^(what|who|where|when|why|how)\s+'), '')
+        .replaceAll(RegExp(r'^(is|are|was|were|do|does|did|can|could)\s+'), '')
+        .replaceAll(RegExp(r'^(tell me|show me|find|lookup|look up)\s+'), '')
+        .replaceAll(RegExp(r'\babout\b'), '')
+        .replaceAll(RegExp(r'[^a-z0-9\s._-]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (normalized.isEmpty) {
+      normalized = query
+          .replaceAll(RegExp(r'[^A-Za-z0-9\s._-]'), ' ')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+    }
+    return normalized.isEmpty ? query.trim() : normalized;
+  }
+
+  String _formatRoloTime(DateTime timestamp) {
+    final local = timestamp.toLocal();
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$month/$day $hour:$minute';
   }
 
   JournalEntryType _resolveJournalResponseType(String input) {
@@ -1111,4 +1277,16 @@ class _JournalInsights {
   bool get hasPlaces => places.isNotEmpty;
   bool get hasAnyData =>
       moods.isNotEmpty || people.isNotEmpty || places.isNotEmpty || highlights.isNotEmpty;
+}
+
+class _VaultContextBundle {
+  final String context;
+  final bool hasFacts;
+  final String factsPreview;
+
+  const _VaultContextBundle({
+    required this.context,
+    required this.hasFacts,
+    required this.factsPreview,
+  });
 }

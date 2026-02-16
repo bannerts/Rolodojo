@@ -136,8 +136,8 @@ class _DojoHomePageState extends State<DojoHomePage> {
         setState(() {
           _senseiState =
               result.attribute != null ? SenseiState.synthesis : SenseiState.idle;
-          _lastSynthesisMessage =
-              result.attribute != null ? result.message : null;
+          final message = result.message.trim();
+          _lastSynthesisMessage = message.isEmpty ? null : message;
         });
 
         await _loadRecentRolos();
