@@ -1,9 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:io';
-import 'package:rolodojo/core/services/security_service.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
