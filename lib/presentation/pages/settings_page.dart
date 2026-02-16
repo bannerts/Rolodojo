@@ -7,6 +7,7 @@ import '../../core/services/backup_service.dart';
 import '../../core/services/biometric_service.dart';
 import '../../core/services/optimization_service.dart';
 import '../../core/services/sensei_llm_service.dart';
+import '../../domain/entities/user_profile.dart';
 
 /// The Dojo settings page.
 ///
@@ -29,14 +30,23 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   final BiometricService _biometricService = BiometricService();
+  final TextEditingController _displayNameController = TextEditingController();
+  final TextEditingController _preferredNameController = TextEditingController();
+  final TextEditingController _timezoneController = TextEditingController();
+  final TextEditingController _localeController = TextEditingController();
+
   bool _biometricsAvailable = false;
   bool _isExporting = false;
   bool _isImporting = false;
   bool _isCheckingLlm = false;
   bool _isSwitchingLlmProvider = false;
+  bool _isLoadingProfile = false;
+  bool _isSavingProfile = false;
+  bool _profileLoaded = false;
   SenseiLlmService? _senseiLlm;
   LlmProvider _selectedProvider = LlmProvider.localLlama;
   LlmHealthStatus _llmHealthStatus = const LlmHealthStatus();
+  Map<String, dynamic> _userProfilePayload = const {};
 
   @override
   void initState() {
@@ -48,11 +58,18 @@ class _SettingsPageState extends State<SettingsPage> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     _bindLlmService();
+    if (!_profileLoaded && !_isLoadingProfile) {
+      unawaited(_loadPrimaryUserProfile());
+    }
   }
 
   @override
   void dispose() {
     _senseiLlm?.healthStatus.removeListener(_handleLlmHealthChanged);
+    _displayNameController.dispose();
+    _preferredNameController.dispose();
+    _timezoneController.dispose();
+    _localeController.dispose();
     super.dispose();
   }
 
@@ -176,6 +193,17 @@ class _SettingsPageState extends State<SettingsPage> {
                 Icons.check_circle,
                 color: DojoColors.success,
               ),
+            ),
+          ]),
+
+          const SizedBox(height: DojoDimens.paddingMedium),
+
+          // Owner Profile Section
+          _buildSectionHeader('Owner Profile'),
+          _buildSettingsCard([
+            Padding(
+              padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+              child: _buildOwnerProfilePanel(),
             ),
           ]),
 
@@ -473,6 +501,191 @@ class _SettingsPageState extends State<SettingsPage> {
             child: const Text('Got it'),
           ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _loadPrimaryUserProfile() async {
+    if (_isLoadingProfile) return;
+    setState(() {
+      _isLoadingProfile = true;
+    });
+
+    try {
+      final dojo = DojoProvider.of(context).dojoService;
+      final profile = await dojo.getPrimaryUserProfile();
+      if (!mounted) return;
+
+      final resolved = profile ??
+          UserProfile(
+            userId: UserProfile.primaryUserId,
+            displayName: 'Dojo User',
+            createdAt: DateTime.now().toUtc(),
+            updatedAt: DateTime.now().toUtc(),
+          );
+
+      _displayNameController.text = resolved.displayName;
+      _preferredNameController.text = resolved.preferredName ?? '';
+      _timezoneController.text = resolved.profile['timezone']?.toString() ?? '';
+      _localeController.text = resolved.profile['locale']?.toString() ?? '';
+      _userProfilePayload = Map<String, dynamic>.from(resolved.profile);
+      _profileLoaded = true;
+    } catch (e) {
+      if (mounted) {
+        _showSnackBar('Failed to load user profile: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingProfile = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _savePrimaryUserProfile() async {
+    final displayName = _displayNameController.text.trim();
+    final preferredName = _preferredNameController.text.trim();
+    final timezone = _timezoneController.text.trim();
+    final locale = _localeController.text.trim();
+
+    if (displayName.isEmpty) {
+      _showSnackBar('Display name is required');
+      return;
+    }
+
+    if (_isSavingProfile) return;
+    setState(() {
+      _isSavingProfile = true;
+    });
+
+    try {
+      final dojo = DojoProvider.of(context).dojoService;
+      final mergedPayload = Map<String, dynamic>.from(_userProfilePayload);
+      if (timezone.isEmpty) {
+        mergedPayload.remove('timezone');
+      } else {
+        mergedPayload['timezone'] = timezone;
+      }
+      if (locale.isEmpty) {
+        mergedPayload.remove('locale');
+      } else {
+        mergedPayload['locale'] = locale;
+      }
+
+      final updated = await dojo.upsertPrimaryUserProfile(
+        displayName: displayName,
+        preferredName: preferredName.isEmpty ? null : preferredName,
+        profile: mergedPayload,
+      );
+
+      _userProfilePayload = Map<String, dynamic>.from(updated.profile);
+      if (mounted) {
+        _showSnackBar('Owner profile saved');
+      }
+    } catch (e) {
+      if (mounted) {
+        _showSnackBar('Failed to save profile: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSavingProfile = false;
+        });
+      }
+    }
+  }
+
+  Widget _buildOwnerProfilePanel() {
+    if (_isLoadingProfile && !_profileLoaded) {
+      return const Center(
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: DojoColors.senseiGold,
+          ),
+        ),
+      );
+    }
+
+    final busy = _isLoadingProfile || _isSavingProfile;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Profile details used for Sensei context',
+          style: TextStyle(color: DojoColors.textHint, fontSize: 12),
+        ),
+        const SizedBox(height: DojoDimens.paddingSmall),
+        _buildProfileField(
+          controller: _displayNameController,
+          label: 'Display Name',
+          hint: 'Dojo User',
+          enabled: !busy,
+        ),
+        const SizedBox(height: DojoDimens.paddingSmall),
+        _buildProfileField(
+          controller: _preferredNameController,
+          label: 'Preferred Name',
+          hint: 'Scott',
+          enabled: !busy,
+        ),
+        const SizedBox(height: DojoDimens.paddingSmall),
+        _buildProfileField(
+          controller: _timezoneController,
+          label: 'Timezone',
+          hint: 'America/Chicago',
+          enabled: !busy,
+        ),
+        const SizedBox(height: DojoDimens.paddingSmall),
+        _buildProfileField(
+          controller: _localeController,
+          label: 'Locale',
+          hint: 'en_US',
+          enabled: !busy,
+        ),
+        const SizedBox(height: DojoDimens.paddingMedium),
+        Align(
+          alignment: Alignment.centerRight,
+          child: ElevatedButton.icon(
+            onPressed: busy ? null : _savePrimaryUserProfile,
+            icon: _isSavingProfile
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.save_outlined, size: 16),
+            label: const Text('Save Profile'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: DojoColors.senseiGold,
+              foregroundColor: DojoColors.slate,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildProfileField({
+    required TextEditingController controller,
+    required String label,
+    required String hint,
+    required bool enabled,
+  }) {
+    return TextField(
+      controller: controller,
+      enabled: enabled,
+      style: const TextStyle(color: DojoColors.textPrimary),
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        labelStyle: const TextStyle(color: DojoColors.textHint),
+        hintStyle: const TextStyle(color: DojoColors.textHint),
+        isDense: true,
       ),
     );
   }
