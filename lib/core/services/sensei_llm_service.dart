@@ -43,12 +43,16 @@ class LlmExtraction {
   /// Confidence score.
   final double confidence;
 
+  /// Whether context indicates this fact already exists in the vault.
+  final bool alreadyExists;
+
   const LlmExtraction({
     this.subjectName,
     this.attributeKey,
     this.attributeValue,
     this.isQuery = false,
     this.confidence = 0.0,
+    this.alreadyExists = false,
   });
 
   bool get canCreateAttribute =>
@@ -127,6 +131,8 @@ class LlmParsingContext {
   final List<String> recentSummonings;
   final List<String> recentTargetUris;
   final List<String> hintAttributes;
+  final List<String> knownRecordSummaries;
+  final List<String> knownFactSummaries;
 
   const LlmParsingContext({
     this.userProfileSummary,
@@ -134,6 +140,8 @@ class LlmParsingContext {
     this.recentSummonings = const [],
     this.recentTargetUris = const [],
     this.hintAttributes = const [],
+    this.knownRecordSummaries = const [],
+    this.knownFactSummaries = const [],
   });
 
   bool get hasAnyHints =>
@@ -141,7 +149,9 @@ class LlmParsingContext {
       (parserSubjectUriHint?.trim().isNotEmpty ?? false) ||
       recentSummonings.isNotEmpty ||
       recentTargetUris.isNotEmpty ||
-      hintAttributes.isNotEmpty;
+      hintAttributes.isNotEmpty ||
+      knownRecordSummaries.isNotEmpty ||
+      knownFactSummaries.isNotEmpty;
 }
 
 /// Connection and readiness state for the active provider.
@@ -1470,6 +1480,7 @@ Return ONLY valid JSON with keys:
 - attribute_value (string or null)
 - is_query (boolean)
 - confidence (number 0..1)
+- already_exists (boolean; true only if context shows this exact fact already exists)
 
 $contextBlock
 Input: "$input"''';
@@ -1494,6 +1505,19 @@ Input: "$input"''';
     }
     if (context.hintAttributes.isNotEmpty) {
       lines.add('- known_attribute_keys: ${context.hintAttributes.take(8).join(', ')}');
+    }
+    if (context.knownRecordSummaries.isNotEmpty) {
+      final records = context.knownRecordSummaries
+          .take(6)
+          .map((s) => _truncate(s.replaceAll('\n', ' '), 120))
+          .join(' | ');
+      lines.add('- known_records: $records');
+    }
+    if (context.knownFactSummaries.isNotEmpty) {
+      lines.add('- known_vault_facts:');
+      for (final fact in context.knownFactSummaries.take(10)) {
+        lines.add('  - ${_truncate(fact.replaceAll('\n', ' '), 140)}');
+      }
     }
     if (context.recentSummonings.isNotEmpty) {
       final cleaned = context.recentSummonings
@@ -1520,8 +1544,10 @@ Rules:
 - Valid categories include con (contact), ent (entity), med (medical), sys (system).
 - Return strict machine-readable output when requested.''';
 
-  static const _extractionSystemPrompt = '''Extract subject, attribute key/value, and query intent.
-If extraction is uncertain, lower confidence and keep fields null.''';
+  static const _extractionSystemPrompt =
+      '''Extract subject, attribute key/value, and query intent.
+If extraction is uncertain, lower confidence and keep fields null.
+If context already contains the exact same subject + key + value fact, set already_exists=true.''';
 
   static const _synthesisSystemPrompt =
       'Generate one concise, factual insight from provided ledger facts.';
@@ -1558,6 +1584,10 @@ Rules:
     final isQuery =
         _toBool(parsed['is_query'] ?? parsed['isQuery'], fallback: false);
     final confidence = _toDouble(parsed['confidence'], fallback: 0.82);
+    final alreadyExists = _toBool(
+      parsed['already_exists'] ?? parsed['alreadyExists'],
+      fallback: false,
+    );
 
     return LlmExtraction(
       subjectName: subjectName,
@@ -1566,6 +1596,7 @@ Rules:
       attributeValue: attributeValue,
       isQuery: isQuery,
       confidence: confidence.clamp(0.0, 1.0).toDouble(),
+      alreadyExists: alreadyExists,
     );
   }
 

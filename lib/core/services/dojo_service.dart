@@ -16,6 +16,7 @@ import '../../domain/repositories/user_repository.dart';
 import 'input_parser.dart';
 import 'location_service.dart';
 import 'sensei_llm_service.dart';
+import '../utils/uri_utils.dart';
 
 /// Result of processing a summoning (user input).
 class SummoningResult {
@@ -123,55 +124,51 @@ class DojoService {
         ? await _userRepository!.getPrimary()
         : null;
 
-    // Parse the input — use active LLM provider if available, fall back to regex
-    var parsed = _inputParser.parse(input);
+    // Parse every input through Sensei (LLM-first with vault context).
+    final parserFallback = _inputParser.parse(input);
+    var parsed = parserFallback;
     var parsedFromLlm = false;
 
-    if (!parsed.canCreateAttribute && _senseiLlm != null && _senseiLlm!.isReady) {
-      // LLM may extract structure that regex missed
-      final recentRolos = await _roloRepository.getRecent(limit: 5);
-      final recentTargetUris = recentRolos
-          .where((r) => r.targetUri != null)
-          .map((r) => r.targetUri!)
-          .toSet()
-          .take(5)
-          .toList(growable: false);
-
-      var hintAttributes = <String>[];
-      if (parsed.subjectUri != null) {
-        final knownAttributes =
-            await _attributeRepository.getByUri(parsed.subjectUri!.toString());
-        hintAttributes = knownAttributes
-            .map((a) => a.key)
-            .take(8)
-            .toList(growable: false);
-      }
-
-      final llmResult = await _senseiLlm!.parseInput(
-        input,
-        context: LlmParsingContext(
-          userProfileSummary: _buildUserProfileSummary(primaryUser),
-          parserSubjectUriHint: parsed.subjectUri?.toString(),
-          recentSummonings: recentRolos
-              .map((r) => r.summoningText)
-              .toList(growable: false),
-          recentTargetUris: recentTargetUris,
-          hintAttributes: hintAttributes,
-        ),
+    if (_senseiLlm != null) {
+      final parsingContext = await _buildLlmParsingContext(
+        input: input,
+        parserFallback: parserFallback,
+        primaryUser: primaryUser,
       );
-      if (llmResult.canCreateAttribute && llmResult.confidence > parsed.confidence) {
-        parsed = ParsedInput(
-          subjectName: llmResult.subjectName,
-          subjectUri: llmResult.subjectName != null
-              ? _inputParser.parse("${llmResult.subjectName}'s x is y").subjectUri
-              : null,
-          attributeKey: llmResult.attributeKey,
-          attributeValue: llmResult.attributeValue,
-          isQuery: llmResult.isQuery,
-          confidence: llmResult.confidence,
-          originalText: input,
-        );
-        parsedFromLlm = true;
+      final llmExtraction = await _senseiLlm!.parseInput(
+        input,
+        context: parsingContext,
+      );
+      parsed = _parsedInputFromExtraction(
+        input: input,
+        fallback: parserFallback,
+        extraction: llmExtraction,
+      );
+      parsedFromLlm = _senseiLlm!.healthStatus.value.isHealthy;
+    }
+
+    if (parsed.canCreateAttribute && parsed.subjectName != null) {
+      final preferredCategory = parsed.subjectUri != null
+          ? UriUtils.getCategoryFromString(parsed.subjectUri!.toString())
+          : null;
+      final matchedRecord = await _findExistingRecordByName(
+        parsed.subjectName!,
+        preferredCategory: preferredCategory,
+      );
+      if (matchedRecord != null &&
+          matchedRecord.uri != parsed.subjectUri?.toString()) {
+        final matchedUri = DojoUri.tryParse(matchedRecord.uri);
+        if (matchedUri != null) {
+          parsed = ParsedInput(
+            subjectName: matchedRecord.displayName,
+            subjectUri: matchedUri,
+            attributeKey: parsed.attributeKey,
+            attributeValue: parsed.attributeValue,
+            isQuery: parsed.isQuery,
+            confidence: parsed.confidence,
+            originalText: parsed.originalText,
+          );
+        }
       }
     }
 
@@ -205,6 +202,7 @@ class DojoService {
     if (parsed.canCreateAttribute) {
       final subjectUri = parsed.subjectUri!.toString();
       final now = DateTime.now();
+      final subjectLabel = parsed.subjectName ?? subjectUri;
 
       // Check if record exists
       final existingRecord = await _recordRepository.getByUri(subjectUri);
@@ -212,17 +210,26 @@ class DojoService {
         subjectUri,
         parsed.attributeKey!,
       );
+      final sameValueAlreadyStored = existingAttribute?.value != null &&
+          _valuesEquivalent(existingAttribute!.value!, parsed.attributeValue);
       final hasConflictingValue = existingAttribute?.value != null &&
           !_valuesEquivalent(existingAttribute!.value!, parsed.attributeValue);
       final shouldProtectExistingValue = parsedFromLlm &&
+          !parserFallback.canCreateAttribute &&
           hasConflictingValue &&
           !_isExplicitUpdateInput(input);
 
-      if (shouldProtectExistingValue) {
+      if (sameValueAlreadyStored) {
+        record = existingRecord;
+        attribute = existingAttribute;
+        message = 'No change made. $subjectLabel already has '
+            '${_formatKey(parsed.attributeKey!)} set to '
+            '"${existingAttribute!.value}".';
+      } else if (shouldProtectExistingValue) {
         record = existingRecord;
         attribute = existingAttribute;
         message = 'Existing ${_formatKey(parsed.attributeKey!)} for '
-            '${parsed.subjectName ?? subjectUri} is "${existingAttribute!.value}". '
+            '$subjectLabel is "${existingAttribute!.value}". '
             'I did not overwrite it automatically. '
             'Use an explicit update command or edit it in The Vault.';
       } else {
@@ -256,8 +263,8 @@ class DojoService {
         await _attributeRepository.upsert(attribute);
 
         message = createdNewRecord
-            ? 'Created ${parsed.subjectName} with ${_formatKey(parsed.attributeKey!)}: ${parsed.attributeValue}'
-            : 'Updated ${parsed.subjectName}\'s ${_formatKey(parsed.attributeKey!)} to ${parsed.attributeValue}';
+            ? 'Created $subjectLabel with ${_formatKey(parsed.attributeKey!)}: ${parsed.attributeValue}'
+            : 'Updated $subjectLabel\'s ${_formatKey(parsed.attributeKey!)} to ${parsed.attributeValue}';
       }
     } else if (parsed.isQuery) {
       message = await _answerQueryFromVault(
@@ -700,6 +707,147 @@ class DojoService {
   /// Searches records by name.
   Future<List<Record>> searchRecords(String query) async {
     return _recordRepository.searchByName(query);
+  }
+
+  Future<LlmParsingContext> _buildLlmParsingContext({
+    required String input,
+    required ParsedInput parserFallback,
+    required UserProfile? primaryUser,
+  }) async {
+    final recentRolos = await _roloRepository.getRecent(limit: 8);
+    final recentTargetUris = recentRolos
+        .where((r) => r.targetUri != null)
+        .map((r) => r.targetUri!)
+        .toSet()
+        .take(6)
+        .toList(growable: false);
+
+    final hintAttributeKeys = <String>{};
+    final knownRecordSummaries = <String>[];
+    final knownFactSummaries = <String>[];
+    final seenRecordUris = <String>{};
+    final seenFactKeys = <String>{};
+
+    void addRecordSummary(Record record) {
+      if (!seenRecordUris.add(record.uri)) {
+        return;
+      }
+      knownRecordSummaries.add('${record.displayName} (${record.uri})');
+    }
+
+    void addFactSummary(Attribute attribute) {
+      final factId = '${attribute.subjectUri}.${attribute.key}';
+      if (!seenFactKeys.add(factId)) {
+        return;
+      }
+      hintAttributeKeys.add(attribute.key);
+      knownFactSummaries.add(
+        '$factId = ${_truncateForPrompt(attribute.value ?? '(deleted)', 90)}',
+      );
+    }
+
+    final fallbackUri = parserFallback.subjectUri?.toString();
+    if (fallbackUri != null) {
+      final directRecord = await _recordRepository.getByUri(fallbackUri);
+      if (directRecord != null) {
+        addRecordSummary(directRecord);
+      }
+      final directAttributes = await _attributeRepository.getByUri(fallbackUri);
+      for (final attribute in directAttributes.take(10)) {
+        addFactSummary(attribute);
+      }
+    }
+
+    final subjectName = parserFallback.subjectName?.trim();
+    if (subjectName != null && subjectName.isNotEmpty) {
+      final byName = await _recordRepository.searchByName(subjectName);
+      for (final record in byName.take(6)) {
+        addRecordSummary(record);
+        final attrs = await _attributeRepository.getByUri(record.uri);
+        for (final attr in attrs.take(6)) {
+          addFactSummary(attr);
+        }
+        if (knownFactSummaries.length >= 16) {
+          break;
+        }
+      }
+    }
+
+    final normalizedQuery = _normalizeQueryForVaultSearch(input);
+    if (normalizedQuery.isNotEmpty) {
+      final attrsBySearch = await _attributeRepository.search(normalizedQuery);
+      for (final attr in attrsBySearch.take(12)) {
+        addFactSummary(attr);
+      }
+    }
+
+    return LlmParsingContext(
+      userProfileSummary: _buildUserProfileSummary(primaryUser),
+      parserSubjectUriHint: parserFallback.subjectUri?.toString(),
+      recentSummonings: recentRolos
+          .map((r) => _truncateForPrompt(r.summoningText, 140))
+          .toList(growable: false),
+      recentTargetUris: recentTargetUris,
+      hintAttributes: hintAttributeKeys.take(12).toList(growable: false),
+      knownRecordSummaries: knownRecordSummaries.take(8).toList(growable: false),
+      knownFactSummaries: knownFactSummaries.take(16).toList(growable: false),
+    );
+  }
+
+  ParsedInput _parsedInputFromExtraction({
+    required String input,
+    required ParsedInput fallback,
+    required LlmExtraction extraction,
+  }) {
+    if (!extraction.canCreateAttribute && !extraction.isQuery) {
+      return fallback;
+    }
+
+    final subjectName = extraction.subjectName;
+    final inferredSubjectUri = subjectName == null
+        ? null
+        : _inputParser.parse("$subjectName's x is y").subjectUri;
+
+    return ParsedInput(
+      subjectName: subjectName,
+      subjectUri: inferredSubjectUri,
+      attributeKey: extraction.attributeKey,
+      attributeValue: extraction.attributeValue,
+      isQuery: extraction.isQuery,
+      confidence: extraction.confidence > 0 ? extraction.confidence : fallback.confidence,
+      originalText: input,
+    );
+  }
+
+  Future<Record?> _findExistingRecordByName(
+    String displayName, {
+    DojoCategory? preferredCategory,
+  }) async {
+    final query = displayName.trim();
+    if (query.isEmpty) {
+      return null;
+    }
+
+    final candidates = await _recordRepository.searchByName(query);
+    if (candidates.isEmpty) {
+      return null;
+    }
+
+    final normalizedQuery = _normalizeDisplayName(query);
+    Record? fallbackMatch;
+    for (final candidate in candidates) {
+      final normalizedCandidate = _normalizeDisplayName(candidate.displayName);
+      if (normalizedCandidate != normalizedQuery) {
+        continue;
+      }
+
+      final category = UriUtils.getCategoryFromString(candidate.uri);
+      if (preferredCategory == null || category == preferredCategory) {
+        return candidate;
+      }
+      fallbackMatch ??= candidate;
+    }
+    return fallbackMatch;
   }
 
   Future<String> _answerQueryFromVault({
@@ -1571,6 +1719,14 @@ class DojoService {
         .toLowerCase()
         .replaceAll(RegExp(r'\s+'), ' ');
     return normalizedLeft == normalizedRight;
+  }
+
+  String _normalizeDisplayName(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   Future<RoloMetadata> _enrichMetadataWithLocation(RoloMetadata metadata) async {
