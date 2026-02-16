@@ -79,7 +79,6 @@ class DojoService {
   final RecordRepository _recordRepository;
   final AttributeRepository _attributeRepository;
   final JournalRepository? _journalRepository;
-  final InputParser _inputParser;
   final SenseiLlmService? _senseiLlm;
   final SenseiRepository? _senseiRepository;
   final UserRepository? _userRepository;
@@ -91,7 +90,6 @@ class DojoService {
     required RecordRepository recordRepository,
     required AttributeRepository attributeRepository,
     JournalRepository? journalRepository,
-    InputParser? inputParser,
     SenseiLlmService? senseiLlm,
     SenseiRepository? senseiRepository,
     UserRepository? userRepository,
@@ -100,7 +98,6 @@ class DojoService {
         _recordRepository = recordRepository,
         _attributeRepository = attributeRepository,
         _journalRepository = journalRepository,
-        _inputParser = inputParser ?? InputParser(),
         _senseiLlm = senseiLlm,
         _senseiRepository = senseiRepository,
         _userRepository = userRepository,
@@ -125,8 +122,8 @@ class DojoService {
     final enrichedMetadata = await _enrichMetadataWithLocation(metadata);
     final resolvedPrimaryUser = primaryUser ?? await _getPrimaryUserProfile();
 
-    // Parse every input through Sensei (LLM-first with vault context).
-    final parserFallback = _inputParser.parse(input);
+    // LLM-first parsing with a lightweight non-regex fallback.
+    final parserFallback = _baselineParsedInput(input);
     var parsed = parserFallback;
     var parsedFromLlm = false;
 
@@ -146,6 +143,8 @@ class DojoService {
         extraction: llmExtraction,
       );
       parsedFromLlm = _senseiLlm!.healthStatus.value.isHealthy;
+    } else {
+      parsed = parserFallback;
     }
 
     if (parsed.canCreateAttribute && parsed.subjectName != null) {
@@ -216,8 +215,8 @@ class DojoService {
       final hasConflictingValue = existingAttribute?.value != null &&
           !_valuesEquivalent(existingAttribute!.value!, parsed.attributeValue);
       final shouldProtectExistingValue = parsedFromLlm &&
-          !parserFallback.canCreateAttribute &&
           hasConflictingValue &&
+          parsed.confidence < 0.85 &&
           !_isExplicitUpdateInput(input);
 
       if (sameValueAlreadyStored) {
@@ -769,9 +768,7 @@ class DojoService {
     }
 
     final subjectName = extraction.subjectName;
-    final inferredSubjectUri = subjectName == null
-        ? null
-        : _inputParser.parse("$subjectName's x is y").subjectUri;
+    final inferredSubjectUri = _inferSubjectUri(subjectName);
 
     return ParsedInput(
       subjectName: subjectName,
@@ -782,6 +779,94 @@ class DojoService {
       confidence: extraction.confidence > 0 ? extraction.confidence : fallback.confidence,
       originalText: input,
     );
+  }
+
+  ParsedInput _baselineParsedInput(String input) {
+    final trimmed = input.trim();
+    return ParsedInput(
+      isQuery: _looksLikeQuery(trimmed),
+      confidence: 0.0,
+      originalText: trimmed,
+    );
+  }
+
+  bool _looksLikeQuery(String input) {
+    final lower = input.toLowerCase();
+    if (lower.endsWith('?')) {
+      return true;
+    }
+    const queryStarters = <String>[
+      'what ',
+      'who ',
+      'where ',
+      'when ',
+      'why ',
+      'how ',
+      'can ',
+      'could ',
+      'do ',
+      'does ',
+      'did ',
+      'is ',
+      'are ',
+      'was ',
+      'were ',
+      'tell me',
+      'show me',
+    ];
+    for (final starter in queryStarters) {
+      if (lower.startsWith(starter)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  DojoUri? _inferSubjectUri(String? subjectName) {
+    final normalizedSubject = subjectName?.trim();
+    if (normalizedSubject == null || normalizedSubject.isEmpty) {
+      return null;
+    }
+
+    final lower = normalizedSubject.toLowerCase();
+    const entityHints = <String>[
+      'place',
+      'location',
+      'gate',
+      'store',
+      'shop',
+      'restaurant',
+      'office',
+      'building',
+      'street',
+      'road',
+      'avenue',
+      'boulevard',
+      'drive',
+      'lane',
+    ];
+    for (final hint in entityHints) {
+      if (lower.contains(hint)) {
+        return UriUtils.entityFromName(normalizedSubject);
+      }
+    }
+
+    const medicalHints = <String>[
+      'blood',
+      'pressure',
+      'symptom',
+      'medicine',
+      'health',
+      'weight',
+      'mood',
+    ];
+    for (final hint in medicalHints) {
+      if (lower.contains(hint)) {
+        return UriUtils.medicalFromName(normalizedSubject);
+      }
+    }
+
+    return UriUtils.contactFromName(normalizedSubject);
   }
 
   Future<Record?> _findExistingRecordByName(

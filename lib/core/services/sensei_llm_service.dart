@@ -6,7 +6,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../utils/uri_utils.dart';
-import 'input_parser.dart';
 
 /// Result of an LLM inference call.
 class LlmResult {
@@ -1937,22 +1936,35 @@ Rules:
 
   /// Enhanced rule-based extraction fallback.
   LlmExtraction _ruleBasedExtraction(String input) {
-    final parser = InputParser();
-    final parsed = parser.parse(input);
-
-    if (parsed.canCreateAttribute) {
-      return LlmExtraction(
-        subjectName: parsed.subjectName,
-        attributeKey: parsed.attributeKey,
-        attributeValue: parsed.attributeValue,
-        isQuery: parsed.isQuery,
-        confidence: parsed.confidence,
-      );
+    final trimmed = input.trim();
+    if (trimmed.isEmpty) {
+      return const LlmExtraction(confidence: 0.0);
     }
 
+    final lower = trimmed.toLowerCase();
+    final isQuery = lower.endsWith('?') ||
+        lower.startsWith('what ') ||
+        lower.startsWith('who ') ||
+        lower.startsWith('where ') ||
+        lower.startsWith('when ') ||
+        lower.startsWith('why ') ||
+        lower.startsWith('how ') ||
+        lower.startsWith('is ') ||
+        lower.startsWith('are ') ||
+        lower.startsWith('was ') ||
+        lower.startsWith('were ') ||
+        lower.startsWith('do ') ||
+        lower.startsWith('does ') ||
+        lower.startsWith('did ') ||
+        lower.startsWith('can ') ||
+        lower.startsWith('could ') ||
+        lower.startsWith('tell me') ||
+        lower.startsWith('show me');
+
+    // Keep fallback intentionally unstructured so extraction relies on LLM.
     return LlmExtraction(
-      isQuery: parsed.isQuery,
-      confidence: parsed.confidence,
+      isQuery: isQuery,
+      confidence: isQuery ? 0.2 : 0.0,
     );
   }
 
