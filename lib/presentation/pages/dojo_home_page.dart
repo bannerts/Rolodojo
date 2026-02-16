@@ -24,7 +24,9 @@ class _DojoHomePageState extends State<DojoHomePage> {
   SenseiState _senseiState = SenseiState.idle;
   List<Rolo> _recentRolos = [];
   bool _isLoading = true;
-  String? _lastSynthesisMessage;
+  String? _lastSenseiMessage;
+  Color _lastSenseiMessageColor = DojoColors.success;
+  IconData _lastSenseiMessageIcon = Icons.check_circle;
   List<SynthesisSuggestion> _pendingSuggestions = [];
 
   @override
@@ -54,13 +56,18 @@ class _DojoHomePageState extends State<DojoHomePage> {
     try {
       final dojo = DojoProvider.of(context).dojoService;
       final result = await dojo.processSummoning(text);
+      final messageStyle = _buildMessageStyle(
+        roloType: result.rolo.type,
+        hasAttributeUpdate: result.attribute != null,
+      );
 
       if (mounted) {
         setState(() {
           _senseiState =
               result.attribute != null ? SenseiState.synthesis : SenseiState.idle;
-          _lastSynthesisMessage =
-              result.attribute != null ? result.message : null;
+          _lastSenseiMessage = result.message;
+          _lastSenseiMessageColor = messageStyle.color;
+          _lastSenseiMessageIcon = messageStyle.icon;
         });
 
         await _loadRecentRolos();
@@ -79,7 +86,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
             if (mounted) {
               setState(() {
                 _senseiState = SenseiState.idle;
-                _lastSynthesisMessage = null;
+                _lastSenseiMessage = null;
               });
             }
           });
@@ -105,6 +112,30 @@ class _DojoHomePageState extends State<DojoHomePage> {
         .split('_')
         .map((w) => w.isEmpty ? '' : '${w[0].toUpperCase()}${w.substring(1)}')
         .join(' ');
+  }
+
+  _SenseiMessageStyle _buildMessageStyle({
+    required RoloType roloType,
+    required bool hasAttributeUpdate,
+  }) {
+    if (roloType == RoloType.request) {
+      return const _SenseiMessageStyle(
+        color: DojoColors.senseiGold,
+        icon: Icons.question_answer_outlined,
+      );
+    }
+
+    if (hasAttributeUpdate) {
+      return const _SenseiMessageStyle(
+        color: DojoColors.success,
+        icon: Icons.check_circle,
+      );
+    }
+
+    return const _SenseiMessageStyle(
+      color: DojoColors.textSecondary,
+      icon: Icons.info_outline,
+    );
   }
 
   @override
@@ -156,22 +187,22 @@ class _DojoHomePageState extends State<DojoHomePage> {
       ),
       body: Column(
         children: [
-          if (_lastSynthesisMessage != null)
+          if (_lastSenseiMessage != null)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(
                 horizontal: DojoDimens.paddingMedium,
                 vertical: DojoDimens.paddingSmall,
               ),
-              color: DojoColors.success.withOpacity(0.15),
+              color: _lastSenseiMessageColor.withOpacity(0.15),
               child: Row(
                 children: [
-                  const Icon(Icons.check_circle, color: DojoColors.success, size: 16),
+                  Icon(_lastSenseiMessageIcon, color: _lastSenseiMessageColor, size: 16),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      _lastSynthesisMessage!,
-                      style: const TextStyle(color: DojoColors.success, fontSize: 13),
+                      _lastSenseiMessage!,
+                      style: TextStyle(color: _lastSenseiMessageColor, fontSize: 13),
                     ),
                   ),
                 ],
@@ -753,4 +784,14 @@ class _VaultRecordCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _SenseiMessageStyle {
+  final Color color;
+  final IconData icon;
+
+  const _SenseiMessageStyle({
+    required this.color,
+    required this.icon,
+  });
 }

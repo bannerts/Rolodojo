@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'input_parser.dart';
 
@@ -101,7 +102,6 @@ abstract class SenseiLlmService {
 /// the model file is not available.
 class LocalLlmService implements SenseiLlmService {
   bool _isReady = false;
-  String? _modelPath;
 
   // In production, this holds the fllama model handle
   // fllama.OpenAiApi? _api;
@@ -115,7 +115,11 @@ class LocalLlmService implements SenseiLlmService {
     int contextSize = 2048,
     int threads = 4,
   }) async {
-    _modelPath = modelPath;
+    final modelFile = File(modelPath);
+    if (!await modelFile.exists()) {
+      _isReady = false;
+      throw StateError('Model file not found: $modelPath');
+    }
 
     // TODO: Uncomment when fllama package is available on target platform
     // _api = fllama.OpenAiApi(
@@ -123,12 +127,6 @@ class LocalLlmService implements SenseiLlmService {
     //   contextSize: contextSize,
     //   nThreads: threads,
     // );
-
-    // Verify model file exists
-    // final modelFile = File(modelPath);
-    // if (!await modelFile.exists()) {
-    //   throw StateError('Model file not found: $modelPath');
-    // }
 
     _isReady = true;
     debugPrint('[Sensei LLM] Model loaded from: $modelPath');
