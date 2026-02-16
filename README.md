@@ -28,6 +28,14 @@ This repository is optimized for AI-first development using **Claude Code** or *
 
 ---
 
+## 🧭 Local-First Architecture
+- [`local_inference.md`](./local_inference.md): Local orchestrator rules for using the local Llama endpoint (`localhost`) with quantized fallback guidance.
+- [`ledger_structure.md`](./ledger_structure.md): URI ledger format and local write contract, including explicit local-only privacy boundaries.
+- Optional online provider mode is supported via Settings (`Claude`, `Grok`, `Gemini`, `ChatGPT`) when API keys are provided.
+- Runtime provider boot option: `--dart-define=LLM_PROVIDER=llama|claude|grok|gemini|chatgpt`
+
+---
+
 ## 🗺️ Phase 1 Checklist (The Foundation)
 | Task | Status | Tool |
 | :--- | :---: | :--- |
@@ -50,4 +58,7 @@ This repository is optimized for AI-first development using **Claude Code** or *
 
 ## 🛡️ Security Note
 All database files (`.db`, `.sqlite`) and local environment secrets are excluded via `.gitignore`. This project follows a **Zero-Cloud Default** policy.
+
+## 📍 Location Metadata
+- Manual Sensei inputs capture GPS coordinates and store them in `Rolo.metadata.location` when device location services and permissions are available.
 

@@ -7,6 +7,7 @@ import '../../domain/repositories/attribute_repository.dart';
 import '../../domain/repositories/record_repository.dart';
 import '../../domain/repositories/rolo_repository.dart';
 import 'input_parser.dart';
+import 'location_service.dart';
 import 'sensei_llm_service.dart';
 
 /// Result of processing a summoning (user input).
@@ -49,6 +50,7 @@ class DojoService {
   final AttributeRepository _attributeRepository;
   final InputParser _inputParser;
   final SenseiLlmService? _senseiLlm;
+  final LocationService _locationService;
   final Uuid _uuid;
 
   DojoService({
@@ -57,11 +59,13 @@ class DojoService {
     required AttributeRepository attributeRepository,
     InputParser? inputParser,
     SenseiLlmService? senseiLlm,
+    LocationService? locationService,
   })  : _roloRepository = roloRepository,
         _recordRepository = recordRepository,
         _attributeRepository = attributeRepository,
         _inputParser = inputParser ?? InputParser(),
         _senseiLlm = senseiLlm,
+        _locationService = locationService ?? LocationService(),
         _uuid = const Uuid();
 
   /// Processes a user summoning (text input) and creates appropriate records.
@@ -75,12 +79,43 @@ class DojoService {
     String input, {
     RoloMetadata metadata = RoloMetadata.empty,
   }) async {
-    // Parse the input — use local LLM if available, fall back to regex
+    // Every user summoning should capture the device coordinates when possible.
+    final enrichedMetadata = await _enrichMetadataWithLocation(metadata);
+
+    // Parse the input — use active LLM provider if available, fall back to regex
     var parsed = _inputParser.parse(input);
 
     if (!parsed.canCreateAttribute && _senseiLlm != null && _senseiLlm!.isReady) {
       // LLM may extract structure that regex missed
-      final llmResult = await _senseiLlm!.parseInput(input);
+      final recentRolos = await _roloRepository.getRecent(limit: 5);
+      final recentTargetUris = recentRolos
+          .where((r) => r.targetUri != null)
+          .map((r) => r.targetUri!)
+          .toSet()
+          .take(5)
+          .toList(growable: false);
+
+      var hintAttributes = <String>[];
+      if (parsed.subjectUri != null) {
+        final knownAttributes =
+            await _attributeRepository.getByUri(parsed.subjectUri!.toString());
+        hintAttributes = knownAttributes
+            .map((a) => a.key)
+            .take(8)
+            .toList(growable: false);
+      }
+
+      final llmResult = await _senseiLlm!.parseInput(
+        input,
+        context: LlmParsingContext(
+          parserSubjectUriHint: parsed.subjectUri?.toString(),
+          recentSummonings: recentRolos
+              .map((r) => r.summoningText)
+              .toList(growable: false),
+          recentTargetUris: recentTargetUris,
+          hintAttributes: hintAttributes,
+        ),
+      );
       if (llmResult.canCreateAttribute && llmResult.confidence > parsed.confidence) {
         parsed = ParsedInput(
           subjectName: llmResult.subjectName,
@@ -104,11 +139,12 @@ class DojoService {
       summoningText: input,
       targetUri: parsed.subjectUri?.toString(),
       metadata: RoloMetadata(
-        trigger: 'Manual_Entry',
+        trigger: enrichedMetadata.trigger ?? 'Manual_Entry',
         confidenceScore: parsed.confidence,
-        location: metadata.location,
-        weather: metadata.weather,
-        sourceDevice: metadata.sourceDevice,
+        location: enrichedMetadata.location,
+        weather: enrichedMetadata.weather,
+        sourceId: enrichedMetadata.sourceId,
+        sourceDevice: enrichedMetadata.sourceDevice,
       ),
       timestamp: DateTime.now().toUtc(),
     );
@@ -181,6 +217,8 @@ class DojoService {
     String subjectUri,
     String key,
   ) async {
+    final deletionLocation = await _locationService.getCurrentCoordinates();
+
     // Create a deletion Rolo
     final roloId = _uuid.v4();
     final rolo = Rolo(
@@ -188,7 +226,10 @@ class DojoService {
       type: RoloType.input,
       summoningText: 'Delete $key from $subjectUri',
       targetUri: subjectUri,
-      metadata: const RoloMetadata(trigger: 'Manual_Delete'),
+      metadata: RoloMetadata(
+        trigger: 'Manual_Delete',
+        location: deletionLocation,
+      ),
       timestamp: DateTime.now().toUtc(),
     );
     await _roloRepository.create(rolo);
@@ -235,5 +276,22 @@ class DojoService {
         .split('_')
         .map((w) => w.isEmpty ? '' : '${w[0].toUpperCase()}${w.substring(1)}')
         .join(' ');
+  }
+
+  Future<RoloMetadata> _enrichMetadataWithLocation(RoloMetadata metadata) async {
+    final existingLocation = metadata.location?.trim();
+    if (existingLocation != null && existingLocation.isNotEmpty) {
+      return metadata;
+    }
+
+    final capturedLocation = await _locationService.getCurrentCoordinates();
+    return RoloMetadata(
+      location: capturedLocation,
+      weather: metadata.weather,
+      sourceId: metadata.sourceId,
+      trigger: metadata.trigger,
+      sourceDevice: metadata.sourceDevice,
+      confidenceScore: metadata.confidenceScore,
+    );
   }
 }

@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../../core/constants/dojo_theme.dart';
 import '../../core/dojo_provider.dart';
+import '../../core/services/sensei_llm_service.dart';
 import '../../core/services/synthesis_service.dart';
 import '../../domain/entities/attribute.dart';
 import '../../domain/entities/rolo.dart';
@@ -26,13 +29,55 @@ class _DojoHomePageState extends State<DojoHomePage> {
   bool _isLoading = true;
   String? _lastSynthesisMessage;
   List<SynthesisSuggestion> _pendingSuggestions = [];
+  SenseiLlmService? _senseiLlm;
+  LlmHealthStatus _llmHealthStatus = const LlmHealthStatus();
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _bindLlmService();
     if (_isLoading) {
       _loadRecentRolos();
     }
+  }
+
+  @override
+  void dispose() {
+    _senseiLlm?.healthStatus.removeListener(_handleLlmHealthChanged);
+    super.dispose();
+  }
+
+  void _bindLlmService() {
+    final provider = DojoProvider.of(context);
+    final nextService = provider.senseiLlm;
+    if (identical(_senseiLlm, nextService)) {
+      return;
+    }
+
+    _senseiLlm?.healthStatus.removeListener(_handleLlmHealthChanged);
+    _senseiLlm = nextService;
+    _senseiLlm!.healthStatus.addListener(_handleLlmHealthChanged);
+    _llmHealthStatus = _senseiLlm!.healthStatus.value;
+
+    if (_llmHealthStatus.checkedAt == null) {
+      unawaited(_senseiLlm!.checkHealth(force: true));
+    }
+  }
+
+  void _handleLlmHealthChanged() {
+    final nextStatus = _senseiLlm?.healthStatus.value;
+    if (!mounted || nextStatus == null) {
+      return;
+    }
+    setState(() {
+      _llmHealthStatus = nextStatus;
+    });
+  }
+
+  Future<void> _retryLlmHealthCheck() async {
+    final llm = _senseiLlm;
+    if (llm == null) return;
+    await llm.checkHealth(force: true);
   }
 
   Future<void> _loadRecentRolos() async {
@@ -156,6 +201,8 @@ class _DojoHomePageState extends State<DojoHomePage> {
       ),
       body: Column(
         children: [
+          if (_llmHealthStatus.checkedAt != null && !_llmHealthStatus.isHealthy)
+            _buildLlmHealthBanner(),
           if (_lastSynthesisMessage != null)
             Container(
               width: double.infinity,
@@ -266,6 +313,41 @@ class _DojoHomePageState extends State<DojoHomePage> {
                   ],
                 ),
               )),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLlmHealthBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(
+        horizontal: DojoDimens.paddingMedium,
+        vertical: DojoDimens.paddingSmall,
+      ),
+      color: DojoColors.alert.withOpacity(0.12),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            color: DojoColors.alert,
+            size: 16,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _llmHealthStatus.message,
+              style: const TextStyle(
+                color: DojoColors.alert,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: _retryLlmHealthCheck,
+            child: const Text('Retry'),
+          ),
         ],
       ),
     );

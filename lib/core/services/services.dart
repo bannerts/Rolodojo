@@ -5,6 +5,7 @@ export 'dojo_service.dart';
 export 'gmail_service.dart';
 export 'input_parser.dart';
 export 'librarian_service.dart';
+export 'location_service.dart';
 export 'optimization_service.dart';
 export 'security_service.dart';
 export 'sensei_llm_service.dart';

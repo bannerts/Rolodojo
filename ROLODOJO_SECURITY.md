@@ -6,8 +6,9 @@
 - **Access:** Biometric Authentication (FaceID/Fingerprint) is required to unlock the Secure Storage and provide the decryption key to the database. No biometrics = No database access. Implemented via `BiometricGatePage` with a blurred overlay.
 
 ## 2. Privacy Guardrails
-- **Zero-Cloud Default:** No data is sent to external servers. The local LLM (`SenseiLlmService`) runs entirely on-device via Llama 3.2 / llama.cpp FFI bindings.
-- **LLM Privacy:** All inference runs locally. No PII tokenization is needed since data never leaves the device. External AI APIs are strictly forbidden per the Zero-Cloud policy.
+- **Local-First Default:** Inference defaults to local Llama (`SenseiLlmService`) via localhost endpoint.
+- **Optional Online Providers:** Claude, Grok, Gemini, and ChatGPT can be user-selected in Settings. These modes require explicit API-key configuration.
+- **LLM Privacy Modes:** In local mode, prompts never leave device/loopback. In online mode, prompt payloads are sent only to the selected provider endpoint.
 
 ## 3. Data Integrity & Auditing
 - **Immutable Ledger:** Records in `tbl_rolos` are never modified or deleted (except Ghost optimization which replaces only the summoning text); they serve as the permanent "black box" for the Dojo.
