@@ -6,7 +6,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../utils/uri_utils.dart';
-import 'input_parser.dart';
 
 /// Result of an LLM inference call.
 class LlmResult {
@@ -46,6 +45,9 @@ class LlmExtraction {
   /// Whether context indicates this fact already exists in the vault.
   final bool alreadyExists;
 
+  /// Whether this fact belongs to owner profile (`tbl_user`) rather than vault.
+  final bool isOwnerProfile;
+
   const LlmExtraction({
     this.subjectName,
     this.attributeKey,
@@ -53,6 +55,7 @@ class LlmExtraction {
     this.isQuery = false,
     this.confidence = 0.0,
     this.alreadyExists = false,
+    this.isOwnerProfile = false,
   });
 
   bool get canCreateAttribute =>
@@ -819,7 +822,10 @@ class LocalLlmService implements SenseiLlmService {
         maxTokens: 180,
         temperature: 0.1,
       );
-      final llmExtraction = _parseExtractionResponse(responseText);
+      final llmExtraction = _parseExtractionResponse(
+        responseText,
+        input: input,
+      );
       return _pickBestExtraction(fallback, llmExtraction);
     } catch (e) {
       _recordParseDebugSnapshot(
@@ -1570,8 +1576,16 @@ Return ONLY valid JSON with keys:
 - is_query (boolean)
 - confidence (number 0..1)
 - already_exists (boolean; true only if context shows this exact fact already exists)
+- is_owner_profile (boolean; true only when this fact is about the device owner profile)
 
 $_scrollEthosContext
+
+Extraction semantics:
+- For owner-profile facts like "my name is ...", "my preferred name is ...", "my address is ...",
+  set is_owner_profile=true and keep subject_name=null.
+- For relationship facts like "my girlfriend's name is Bridget Hale",
+  extract as subject_name="Bridget Hale", attribute_key="relationship_to_user",
+  attribute_value="girlfriend", is_owner_profile=false.
 
 $contextBlock
 Input: "$input"''';
@@ -1669,7 +1683,12 @@ Interaction style:
   static const _extractionSystemPrompt =
       '''Extract subject, attribute key/value, and query intent.
 If extraction is uncertain, lower confidence and keep fields null.
-If context already contains the exact same subject + key + value fact, set already_exists=true.''';
+If context already contains the exact same subject + key + value fact, set already_exists=true.
+Subject naming rules:
+- subject_name must be only the entity/person name, never a full clause.
+- Do not include connectors like "and", "is", "I live at", or sentence fragments in subject_name.
+- For self-introductions like "my name is X", set is_owner_profile=true and keep subject_name null.
+- If one sentence includes multiple facts, extract the single clearest fact and keep subject_name clean.''';
 
   static const _synthesisSystemPrompt =
       'Generate one concise, factual insight from provided ledger facts.';
@@ -1688,7 +1707,20 @@ Rules:
   static const _summarySystemPrompt =
       'Summarize briefly without adding unverified details.';
 
-  LlmExtraction _parseExtractionResponse(String responseText) {
+  static const Set<String> _relationshipTerms = <String>{
+    'girlfriend',
+    'boyfriend',
+    'wife',
+    'husband',
+    'partner',
+    'fiance',
+    'fiancee',
+  };
+
+  LlmExtraction _parseExtractionResponse(
+    String responseText, {
+    String? input,
+  }) {
     final parsed = _extractJsonMap(responseText);
     if (parsed == null) {
       return const LlmExtraction(confidence: 0.0);
@@ -1710,15 +1742,120 @@ Rules:
       parsed['already_exists'] ?? parsed['alreadyExists'],
       fallback: false,
     );
+    final isOwnerProfile = _toBool(
+      parsed['is_owner_profile'] ?? parsed['isOwnerProfile'],
+      fallback: false,
+    );
+
+    final normalized = _normalizeExtractionSemantics(
+      input: input,
+      subjectName: subjectName,
+      attributeKeyRaw: attributeKeyRaw,
+      attributeValue: attributeValue,
+      isOwnerProfile: isOwnerProfile,
+    );
 
     return LlmExtraction(
-      subjectName: subjectName,
-      attributeKey:
-          attributeKeyRaw != null ? UriUtils.nameToIdentifier(attributeKeyRaw) : null,
-      attributeValue: attributeValue,
+      subjectName: normalized.subjectName,
+      attributeKey: normalized.attributeKeyRaw != null
+          ? UriUtils.nameToIdentifier(normalized.attributeKeyRaw!)
+          : null,
+      attributeValue: normalized.attributeValue,
       isQuery: isQuery,
       confidence: confidence.clamp(0.0, 1.0).toDouble(),
       alreadyExists: alreadyExists,
+      isOwnerProfile: normalized.isOwnerProfile,
+    );
+  }
+
+  ({
+    String? subjectName,
+    String? attributeKeyRaw,
+    String? attributeValue,
+    bool isOwnerProfile,
+  }) _normalizeExtractionSemantics({
+    required String? input,
+    required String? subjectName,
+    required String? attributeKeyRaw,
+    required String? attributeValue,
+    required bool isOwnerProfile,
+  }) {
+    final normalizedSubject = subjectName?.trim();
+    final normalizedKey = attributeKeyRaw?.trim().toLowerCase();
+    final normalizedValue = attributeValue?.trim();
+    final normalizedInput = (input ?? '').trim().toLowerCase();
+    var ownerProfile = isOwnerProfile;
+
+    if (normalizedSubject != null && normalizedKey == 'name' && normalizedValue != null) {
+      final lowerSubject = normalizedSubject.toLowerCase();
+      if (lowerSubject.startsWith('my ')) {
+        final relationship = lowerSubject.substring(3).trim();
+        if (_relationshipTerms.contains(relationship) &&
+            normalizedValue.isNotEmpty) {
+          return (
+            subjectName: normalizedValue,
+            attributeKeyRaw: 'relationship_to_user',
+            attributeValue: relationship,
+            isOwnerProfile: false,
+          );
+        }
+      }
+      if (lowerSubject == 'my') {
+        ownerProfile = true;
+      }
+    }
+
+    if (normalizedKey == 'name') {
+      for (final relationship in _relationshipTerms) {
+        if (!normalizedInput.contains('my $relationship')) {
+          continue;
+        }
+        final personName = (normalizedValue != null && normalizedValue.isNotEmpty)
+            ? normalizedValue
+            : normalizedSubject;
+        if (personName == null || personName.isEmpty) {
+          continue;
+        }
+        return (
+          subjectName: personName,
+          attributeKeyRaw: 'relationship_to_user',
+          attributeValue: relationship,
+          isOwnerProfile: false,
+        );
+      }
+    }
+
+    if (normalizedSubject != null && normalizedSubject.toLowerCase() == 'my') {
+      ownerProfile = true;
+    }
+
+    if ((normalizedInput.contains('my name is') ||
+            normalizedInput.startsWith('i am ')) &&
+        normalizedKey == 'name') {
+      ownerProfile = true;
+    }
+    if (normalizedInput.contains('my preferred name') &&
+        (normalizedKey == 'name' || normalizedKey == 'preferred_name')) {
+      ownerProfile = true;
+    }
+    if (normalizedInput.contains('my address') && normalizedKey == 'address') {
+      ownerProfile = true;
+    }
+
+    if (ownerProfile) {
+      return (
+        subjectName: null,
+        attributeKeyRaw: normalizedKey == 'name' ? 'display_name' : normalizedKey,
+        attributeValue: normalizedValue,
+        isOwnerProfile: true,
+      );
+    }
+
+    return (
+      subjectName: normalizedSubject,
+      attributeKeyRaw: normalizedKey,
+      attributeValue: normalizedValue,
+      isOwnerProfile: false,
     );
   }
 
@@ -1875,6 +2012,20 @@ Rules:
     LlmExtraction fallback,
     LlmExtraction llmExtraction,
   ) {
+    final llmOwnerProfileFact = llmExtraction.isOwnerProfile &&
+        llmExtraction.attributeKey != null &&
+        llmExtraction.attributeValue != null;
+    if (llmOwnerProfileFact &&
+        llmExtraction.confidence >= fallback.confidence) {
+      return llmExtraction;
+    }
+    if (llmExtraction.canCreateAttribute &&
+        llmExtraction.confidence >= 0.45 &&
+        (_looksLikeOverCapturedName(fallback.subjectName) ||
+            _looksLikeOverCapturedValue(fallback.attributeValue) ||
+            _looksLikeSelfNameFallback(fallback))) {
+      return llmExtraction;
+    }
     if (llmExtraction.canCreateAttribute &&
         llmExtraction.confidence >= fallback.confidence) {
       return llmExtraction;
@@ -1887,24 +2038,73 @@ Rules:
     return fallback;
   }
 
+  bool _looksLikeSelfNameFallback(LlmExtraction extraction) {
+    final subject = (extraction.subjectName ?? '').trim().toLowerCase();
+    final key = (extraction.attributeKey ?? '').trim().toLowerCase();
+    final value = (extraction.attributeValue ?? '').trim().toLowerCase();
+    if (subject != 'my' || key != 'name') {
+      return false;
+    }
+    return value.contains(' and i ') ||
+        value.contains(' i live ') ||
+        value.contains(' lives at ') ||
+        value.contains(' my address ');
+  }
+
+  bool _looksLikeOverCapturedName(String? subjectName) {
+    final normalized = (subjectName ?? '').trim().toLowerCase();
+    if (normalized.isEmpty) {
+      return false;
+    }
+    return normalized.contains(' and i ') ||
+        normalized.contains(' i live ') ||
+        normalized.contains(' lives at ') ||
+        normalized.contains(' my name is ') ||
+        normalized.contains(' is my ');
+  }
+
+  bool _looksLikeOverCapturedValue(String? attributeValue) {
+    final normalized = (attributeValue ?? '').trim().toLowerCase();
+    if (normalized.isEmpty) {
+      return false;
+    }
+    return normalized.contains(' and i ') ||
+        normalized.contains(' and my ') ||
+        normalized.contains(' i live at ') ||
+        normalized.contains(' my name is ');
+  }
+
   /// Enhanced rule-based extraction fallback.
   LlmExtraction _ruleBasedExtraction(String input) {
-    final parser = InputParser();
-    final parsed = parser.parse(input);
-
-    if (parsed.canCreateAttribute) {
-      return LlmExtraction(
-        subjectName: parsed.subjectName,
-        attributeKey: parsed.attributeKey,
-        attributeValue: parsed.attributeValue,
-        isQuery: parsed.isQuery,
-        confidence: parsed.confidence,
-      );
+    final trimmed = input.trim();
+    if (trimmed.isEmpty) {
+      return const LlmExtraction(confidence: 0.0);
     }
 
+    final lower = trimmed.toLowerCase();
+    final isQuery = lower.endsWith('?') ||
+        lower.startsWith('what ') ||
+        lower.startsWith('who ') ||
+        lower.startsWith('where ') ||
+        lower.startsWith('when ') ||
+        lower.startsWith('why ') ||
+        lower.startsWith('how ') ||
+        lower.startsWith('is ') ||
+        lower.startsWith('are ') ||
+        lower.startsWith('was ') ||
+        lower.startsWith('were ') ||
+        lower.startsWith('do ') ||
+        lower.startsWith('does ') ||
+        lower.startsWith('did ') ||
+        lower.startsWith('can ') ||
+        lower.startsWith('could ') ||
+        lower.startsWith('tell me') ||
+        lower.startsWith('show me');
+
+    // Keep fallback intentionally unstructured so extraction relies on LLM.
     return LlmExtraction(
-      isQuery: parsed.isQuery,
-      confidence: parsed.confidence,
+      isQuery: isQuery,
+      confidence: isQuery ? 0.2 : 0.0,
     );
   }
 

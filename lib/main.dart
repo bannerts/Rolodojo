@@ -104,6 +104,7 @@ class _RolodojoAppState extends State<RolodojoApp> {
           journalRepository: provider.journalRepository,
           userRepository: provider.userRepository,
           senseiRepository: provider.senseiRepository,
+          locationService: provider.locationService,
           child: MaterialApp(
             title: 'ROLODOJO',
             debugShowCheckedModeBanner: false,

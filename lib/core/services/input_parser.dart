@@ -24,6 +24,9 @@ class ParsedInput {
   /// The original input text.
   final String originalText;
 
+  /// True when the extracted fact belongs to owner profile (`tbl_user`).
+  final bool isOwnerProfile;
+
   const ParsedInput({
     this.subjectName,
     this.subjectUri,
@@ -31,6 +34,7 @@ class ParsedInput {
     this.attributeValue,
     this.isQuery = false,
     this.confidence = 0.0,
+    this.isOwnerProfile = false,
     required this.originalText,
   });
 
@@ -88,6 +92,29 @@ class InputParser {
         subject: match.group(1)!.trim(),
         key: match.group(2)!.trim(),
         value: match.group(3)!.trim(),
+      ),
+    ),
+
+    // "[Name] lives at [address]"
+    _PatternMatcher(
+      RegExp(r"^(.+?)\s+(?:lives?|resides?)\s+at\s+(.+)$", caseSensitive: false),
+      (match) => (
+        subject: match.group(1)!.trim(),
+        key: 'address',
+        value: match.group(2)!.trim(),
+      ),
+    ),
+
+    // "Address for [Name] is [address]"
+    _PatternMatcher(
+      RegExp(
+        r"^address\s+for\s+(.+?)\s*(?:is|:)\s+(.+)$",
+        caseSensitive: false,
+      ),
+      (match) => (
+        subject: match.group(1)!.trim(),
+        key: 'address',
+        value: match.group(2)!.trim(),
       ),
     ),
 
@@ -162,6 +189,9 @@ class InputParser {
       final match = pattern.regex.firstMatch(trimmedInput);
       if (match != null) {
         final result = pattern.extractor(match);
+        if (_shouldDeferToLlm(result.subject, result.key, result.value)) {
+          continue;
+        }
         if (result.key == _relationshipKey && !_looksLikePersonName(result.subject)) {
           continue;
         }
@@ -299,6 +329,45 @@ class InputParser {
     }
     final token = tokens.first;
     return token.length >= 2 && RegExp(r'[A-Z]').hasMatch(token);
+  }
+
+  static bool _shouldDeferToLlm(
+    String subject,
+    String key,
+    String value,
+  ) {
+    final normalizedSubject = subject.trim().toLowerCase();
+    final normalizedKey = key.trim().toLowerCase();
+    final normalizedValue = value.trim().toLowerCase();
+
+    // Self-introduction lines are often multi-clause and best resolved by LLM
+    // with full context (owner profile + vault hints).
+    if (normalizedSubject == 'my' && normalizedKey == 'name') {
+      return true;
+    }
+
+    // Guard against over-captured address subjects like:
+    // "My Name is Scott Bannert and I live at ...".
+    if (normalizedKey == 'address') {
+      if (normalizedSubject.contains(' and i ') ||
+          normalizedSubject.contains(' my name is ') ||
+          normalizedSubject.contains(' i live ') ||
+          normalizedSubject.contains(' is ')) {
+        return true;
+      }
+    }
+
+    // Guard against name values swallowing an extra clause.
+    if (normalizedKey == 'name') {
+      if (normalizedValue.contains(' and i live ') ||
+          normalizedValue.contains(' and my ') ||
+          normalizedValue.contains(' my address ') ||
+          normalizedValue.contains(' lives at ')) {
+        return true;
+      }
+    }
+
+    return false;
   }
 }
 

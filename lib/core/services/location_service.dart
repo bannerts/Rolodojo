@@ -1,23 +1,52 @@
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
+enum LocationAccessStatus {
+  granted,
+  denied,
+  deniedForever,
+  serviceDisabled,
+  unavailable,
+}
+
 /// Captures device GPS coordinates for ledger metadata.
 class LocationService {
-  /// Returns coordinates as "lat,lon" in decimal degrees, or null when unavailable.
-  Future<String?> getCurrentCoordinates() async {
+  /// Checks and (optionally) requests foreground location permission.
+  ///
+  /// Returns a status describing whether location capture can proceed.
+  Future<LocationAccessStatus> ensureLocationAccess({
+    bool requestPermission = true,
+  }) async {
     try {
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        return null;
-      }
-
       var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
+      if (requestPermission && permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
 
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
+      if (permission == LocationPermission.denied) {
+        return LocationAccessStatus.denied;
+      }
+      if (permission == LocationPermission.deniedForever) {
+        return LocationAccessStatus.deniedForever;
+      }
+
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        return LocationAccessStatus.serviceDisabled;
+      }
+
+      return LocationAccessStatus.granted;
+    } catch (e) {
+      debugPrint('[LocationService] Location access check failed: $e');
+      return LocationAccessStatus.unavailable;
+    }
+  }
+
+  /// Returns coordinates as "lat,lon" in decimal degrees, or null when unavailable.
+  Future<String?> getCurrentCoordinates() async {
+    try {
+      final access = await ensureLocationAccess(requestPermission: true);
+      if (access != LocationAccessStatus.granted) {
         return null;
       }
 

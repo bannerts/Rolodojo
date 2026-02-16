@@ -43,6 +43,13 @@ flutter test
 flutter test integration_test/system_integrity_test.dart
 ```
 
+If your checkout does not include `android/` and `ios/` folders yet:
+
+```bash
+flutter create --org com.rolodojo .
+./configure_platform_permissions.sh .
+```
+
 Optional provider override:
 
 ```bash
