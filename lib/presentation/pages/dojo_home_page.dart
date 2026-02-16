@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../core/constants/dojo_theme.dart';
 import '../../core/dojo_provider.dart';
+import '../../core/services/location_service.dart';
 import '../../core/services/sensei_llm_service.dart';
 import '../../core/services/synthesis_service.dart';
 import '../../domain/entities/attribute.dart';
@@ -37,11 +38,17 @@ class _DojoHomePageState extends State<DojoHomePage> {
   List<SynthesisSuggestion> _pendingSuggestions = [];
   SenseiLlmService? _senseiLlm;
   LlmHealthStatus _llmHealthStatus = const LlmHealthStatus();
+  bool _didCheckLocationAccess = false;
+  bool _locationWarningShown = false;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _bindLlmService();
+    if (!_didCheckLocationAccess) {
+      _didCheckLocationAccess = true;
+      unawaited(_primeLocationAccess());
+    }
     if (_isLoading) {
       _loadRecentRolos();
     }
@@ -132,6 +139,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
     try {
       final dojo = DojoProvider.of(context).dojoService;
       final result = await dojo.processSummoning(text);
+      await _warnIfLocationMissing(result.rolo);
 
       if (mounted) {
         setState(() {
@@ -179,7 +187,8 @@ class _DojoHomePageState extends State<DojoHomePage> {
 
     try {
       final dojo = DojoProvider.of(context).dojoService;
-      await dojo.processJournalEntry(text);
+      final result = await dojo.processJournalEntry(text);
+      await _warnIfLocationMissing(result.rolo);
       await _loadRecentJournalEntries();
     } catch (e) {
       _showSnackBar('Journal error: $e', backgroundColor: DojoColors.alert);
@@ -254,6 +263,92 @@ class _DojoHomePageState extends State<DojoHomePage> {
         backgroundColor: backgroundColor,
       ),
     );
+  }
+
+  Future<void> _primeLocationAccess() async {
+    final locationService = DojoProvider.of(context).locationService;
+    final status =
+        await locationService.ensureLocationAccess(requestPermission: true);
+    if (!mounted) return;
+    switch (status) {
+      case LocationAccessStatus.granted:
+      case LocationAccessStatus.unavailable:
+        return;
+      case LocationAccessStatus.denied:
+        _showSnackBar(
+          'Location permission denied. Entries may not include GPS.',
+          backgroundColor: DojoColors.alert,
+        );
+        return;
+      case LocationAccessStatus.deniedForever:
+        _showSnackBar(
+          'Location permission is permanently denied. Enable it in system '
+          'settings so entries include GPS.',
+          backgroundColor: DojoColors.alert,
+        );
+        return;
+      case LocationAccessStatus.serviceDisabled:
+        _showSnackBar(
+          'Location services are off. Turn on GPS so entries include coordinates.',
+          backgroundColor: DojoColors.alert,
+        );
+        return;
+    }
+  }
+
+  Future<void> _warnIfLocationMissing(Rolo rolo) async {
+    if (_locationWarningShown) {
+      return;
+    }
+    final location = rolo.metadata.location?.trim();
+    if (location != null && location.isNotEmpty) {
+      return;
+    }
+
+    _locationWarningShown = true;
+    final locationService = DojoProvider.of(context).locationService;
+    final status =
+        await locationService.ensureLocationAccess(requestPermission: false);
+    if (!mounted) {
+      return;
+    }
+
+    switch (status) {
+      case LocationAccessStatus.granted:
+        _showSnackBar(
+          'GPS was not captured for this entry. Keep location services on and '
+          'try again.',
+          backgroundColor: DojoColors.alert,
+        );
+        return;
+      case LocationAccessStatus.denied:
+        _showSnackBar(
+          'Location permission is denied. Enable it so every entry includes GPS.',
+          backgroundColor: DojoColors.alert,
+        );
+        return;
+      case LocationAccessStatus.deniedForever:
+        _showSnackBar(
+          'Location permission is permanently denied. Enable it in system '
+          'settings so every entry includes GPS.',
+          backgroundColor: DojoColors.alert,
+        );
+        return;
+      case LocationAccessStatus.serviceDisabled:
+        _showSnackBar(
+          'Location services are disabled. Turn on GPS so every entry includes '
+          'coordinates.',
+          backgroundColor: DojoColors.alert,
+        );
+        return;
+      case LocationAccessStatus.unavailable:
+        _showSnackBar(
+          'Location access is unavailable in this build, so GPS could not be '
+          'attached to the entry.',
+          backgroundColor: DojoColors.alert,
+        );
+        return;
+    }
   }
 
   @override

@@ -40,6 +40,7 @@ class DojoProvider extends InheritedWidget {
   final JournalRepository journalRepository;
   final UserRepository userRepository;
   final SenseiRepository senseiRepository;
+  final LocationService locationService;
 
   const DojoProvider({
     required this.dojoService,
@@ -53,6 +54,7 @@ class DojoProvider extends InheritedWidget {
     required this.journalRepository,
     required this.userRepository,
     required this.senseiRepository,
+    required this.locationService,
     required super.child,
     super.key,
   });
@@ -214,6 +216,7 @@ class DojoProvider extends InheritedWidget {
       journalRepository: journalRepo,
       userRepository: userRepo,
       senseiRepository: senseiRepo,
+      locationService: locationService,
       child: child,
     );
   }
