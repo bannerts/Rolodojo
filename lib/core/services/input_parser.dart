@@ -24,6 +24,9 @@ class ParsedInput {
   /// The original input text.
   final String originalText;
 
+  /// True when the extracted fact belongs to owner profile (`tbl_user`).
+  final bool isOwnerProfile;
+
   const ParsedInput({
     this.subjectName,
     this.subjectUri,
@@ -31,6 +34,7 @@ class ParsedInput {
     this.attributeValue,
     this.isQuery = false,
     this.confidence = 0.0,
+    this.isOwnerProfile = false,
     required this.originalText,
   });
 

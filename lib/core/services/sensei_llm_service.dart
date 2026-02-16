@@ -45,6 +45,9 @@ class LlmExtraction {
   /// Whether context indicates this fact already exists in the vault.
   final bool alreadyExists;
 
+  /// Whether this fact belongs to owner profile (`tbl_user`) rather than vault.
+  final bool isOwnerProfile;
+
   const LlmExtraction({
     this.subjectName,
     this.attributeKey,
@@ -52,6 +55,7 @@ class LlmExtraction {
     this.isQuery = false,
     this.confidence = 0.0,
     this.alreadyExists = false,
+    this.isOwnerProfile = false,
   });
 
   bool get canCreateAttribute =>
@@ -818,7 +822,10 @@ class LocalLlmService implements SenseiLlmService {
         maxTokens: 180,
         temperature: 0.1,
       );
-      final llmExtraction = _parseExtractionResponse(responseText);
+      final llmExtraction = _parseExtractionResponse(
+        responseText,
+        input: input,
+      );
       return _pickBestExtraction(fallback, llmExtraction);
     } catch (e) {
       _recordParseDebugSnapshot(
@@ -1569,8 +1576,16 @@ Return ONLY valid JSON with keys:
 - is_query (boolean)
 - confidence (number 0..1)
 - already_exists (boolean; true only if context shows this exact fact already exists)
+- is_owner_profile (boolean; true only when this fact is about the device owner profile)
 
 $_scrollEthosContext
+
+Extraction semantics:
+- For owner-profile facts like "my name is ...", "my preferred name is ...", "my address is ...",
+  set is_owner_profile=true and keep subject_name=null.
+- For relationship facts like "my girlfriend's name is Bridget Hale",
+  extract as subject_name="Bridget Hale", attribute_key="relationship_to_user",
+  attribute_value="girlfriend", is_owner_profile=false.
 
 $contextBlock
 Input: "$input"''';
@@ -1672,7 +1687,7 @@ If context already contains the exact same subject + key + value fact, set alrea
 Subject naming rules:
 - subject_name must be only the entity/person name, never a full clause.
 - Do not include connectors like "and", "is", "I live at", or sentence fragments in subject_name.
-- For self-introductions like "my name is X", subject_name should be "X".
+- For self-introductions like "my name is X", set is_owner_profile=true and keep subject_name null.
 - If one sentence includes multiple facts, extract the single clearest fact and keep subject_name clean.''';
 
   static const _synthesisSystemPrompt =
@@ -1692,7 +1707,20 @@ Rules:
   static const _summarySystemPrompt =
       'Summarize briefly without adding unverified details.';
 
-  LlmExtraction _parseExtractionResponse(String responseText) {
+  static const Set<String> _relationshipTerms = <String>{
+    'girlfriend',
+    'boyfriend',
+    'wife',
+    'husband',
+    'partner',
+    'fiance',
+    'fiancee',
+  };
+
+  LlmExtraction _parseExtractionResponse(
+    String responseText, {
+    String? input,
+  }) {
     final parsed = _extractJsonMap(responseText);
     if (parsed == null) {
       return const LlmExtraction(confidence: 0.0);
@@ -1714,15 +1742,120 @@ Rules:
       parsed['already_exists'] ?? parsed['alreadyExists'],
       fallback: false,
     );
+    final isOwnerProfile = _toBool(
+      parsed['is_owner_profile'] ?? parsed['isOwnerProfile'],
+      fallback: false,
+    );
+
+    final normalized = _normalizeExtractionSemantics(
+      input: input,
+      subjectName: subjectName,
+      attributeKeyRaw: attributeKeyRaw,
+      attributeValue: attributeValue,
+      isOwnerProfile: isOwnerProfile,
+    );
 
     return LlmExtraction(
-      subjectName: subjectName,
-      attributeKey:
-          attributeKeyRaw != null ? UriUtils.nameToIdentifier(attributeKeyRaw) : null,
-      attributeValue: attributeValue,
+      subjectName: normalized.subjectName,
+      attributeKey: normalized.attributeKeyRaw != null
+          ? UriUtils.nameToIdentifier(normalized.attributeKeyRaw!)
+          : null,
+      attributeValue: normalized.attributeValue,
       isQuery: isQuery,
       confidence: confidence.clamp(0.0, 1.0).toDouble(),
       alreadyExists: alreadyExists,
+      isOwnerProfile: normalized.isOwnerProfile,
+    );
+  }
+
+  ({
+    String? subjectName,
+    String? attributeKeyRaw,
+    String? attributeValue,
+    bool isOwnerProfile,
+  }) _normalizeExtractionSemantics({
+    required String? input,
+    required String? subjectName,
+    required String? attributeKeyRaw,
+    required String? attributeValue,
+    required bool isOwnerProfile,
+  }) {
+    final normalizedSubject = subjectName?.trim();
+    final normalizedKey = attributeKeyRaw?.trim().toLowerCase();
+    final normalizedValue = attributeValue?.trim();
+    final normalizedInput = (input ?? '').trim().toLowerCase();
+    var ownerProfile = isOwnerProfile;
+
+    if (normalizedSubject != null && normalizedKey == 'name' && normalizedValue != null) {
+      final lowerSubject = normalizedSubject.toLowerCase();
+      if (lowerSubject.startsWith('my ')) {
+        final relationship = lowerSubject.substring(3).trim();
+        if (_relationshipTerms.contains(relationship) &&
+            normalizedValue.isNotEmpty) {
+          return (
+            subjectName: normalizedValue,
+            attributeKeyRaw: 'relationship_to_user',
+            attributeValue: relationship,
+            isOwnerProfile: false,
+          );
+        }
+      }
+      if (lowerSubject == 'my') {
+        ownerProfile = true;
+      }
+    }
+
+    if (normalizedKey == 'name') {
+      for (final relationship in _relationshipTerms) {
+        if (!normalizedInput.contains('my $relationship')) {
+          continue;
+        }
+        final personName = (normalizedValue != null && normalizedValue.isNotEmpty)
+            ? normalizedValue
+            : normalizedSubject;
+        if (personName == null || personName.isEmpty) {
+          continue;
+        }
+        return (
+          subjectName: personName,
+          attributeKeyRaw: 'relationship_to_user',
+          attributeValue: relationship,
+          isOwnerProfile: false,
+        );
+      }
+    }
+
+    if (normalizedSubject != null && normalizedSubject.toLowerCase() == 'my') {
+      ownerProfile = true;
+    }
+
+    if ((normalizedInput.contains('my name is') ||
+            normalizedInput.startsWith('i am ')) &&
+        normalizedKey == 'name') {
+      ownerProfile = true;
+    }
+    if (normalizedInput.contains('my preferred name') &&
+        (normalizedKey == 'name' || normalizedKey == 'preferred_name')) {
+      ownerProfile = true;
+    }
+    if (normalizedInput.contains('my address') && normalizedKey == 'address') {
+      ownerProfile = true;
+    }
+
+    if (ownerProfile) {
+      return (
+        subjectName: null,
+        attributeKeyRaw: normalizedKey == 'name' ? 'display_name' : normalizedKey,
+        attributeValue: normalizedValue,
+        isOwnerProfile: true,
+      );
+    }
+
+    return (
+      subjectName: normalizedSubject,
+      attributeKeyRaw: normalizedKey,
+      attributeValue: normalizedValue,
+      isOwnerProfile: false,
     );
   }
 
@@ -1879,6 +2012,13 @@ Rules:
     LlmExtraction fallback,
     LlmExtraction llmExtraction,
   ) {
+    final llmOwnerProfileFact = llmExtraction.isOwnerProfile &&
+        llmExtraction.attributeKey != null &&
+        llmExtraction.attributeValue != null;
+    if (llmOwnerProfileFact &&
+        llmExtraction.confidence >= fallback.confidence) {
+      return llmExtraction;
+    }
     if (llmExtraction.canCreateAttribute &&
         llmExtraction.confidence >= 0.45 &&
         (_looksLikeOverCapturedName(fallback.subjectName) ||

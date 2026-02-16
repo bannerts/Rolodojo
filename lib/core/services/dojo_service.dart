@@ -75,6 +75,8 @@ class JournalProcessingResult {
 /// This is the main coordinator that processes user input, creates Rolos,
 /// updates attributes, and manages the data flow between all components.
 class DojoService {
+  static const String _ownerProfileTargetUri = 'dojo.user.owner';
+
   final RoloRepository _roloRepository;
   final RecordRepository _recordRepository;
   final AttributeRepository _attributeRepository;
@@ -147,7 +149,9 @@ class DojoService {
       parsed = parserFallback;
     }
 
-    if (parsed.canCreateAttribute && parsed.subjectName != null) {
+    if (!parsed.isOwnerProfile &&
+        parsed.canCreateAttribute &&
+        parsed.subjectName != null) {
       final preferredCategory = parsed.subjectUri != null
           ? UriUtils.getCategoryFromString(parsed.subjectUri!.toString())
           : null;
@@ -166,11 +170,17 @@ class DojoService {
             attributeValue: parsed.attributeValue,
             isQuery: parsed.isQuery,
             confidence: parsed.confidence,
+            isOwnerProfile: parsed.isOwnerProfile,
             originalText: parsed.originalText,
           );
         }
       }
     }
+
+    final ownerProfileUpdate = parsed.isOwnerProfile &&
+        parsed.attributeKey != null &&
+        parsed.attributeValue != null &&
+        parsed.attributeValue!.trim().isNotEmpty;
 
     // Create the Rolo
     final roloId = _uuid.v4();
@@ -178,7 +188,9 @@ class DojoService {
       id: roloId,
       type: parsed.isQuery ? RoloType.request : RoloType.input,
       summoningText: input,
-      targetUri: parsed.subjectUri?.toString() ?? fallbackTargetUri,
+      targetUri: ownerProfileUpdate
+          ? _ownerProfileTargetUri
+          : parsed.subjectUri?.toString() ?? fallbackTargetUri,
       metadata: RoloMetadata(
         trigger: enrichedMetadata.trigger ?? 'Manual_Entry',
         confidenceScore: parsed.confidence,
@@ -199,7 +211,18 @@ class DojoService {
     bool createdNewRecord = false;
     String message;
 
-    if (parsed.canCreateAttribute) {
+    if (ownerProfileUpdate) {
+      final updatedUser = await _applyOwnerProfileFact(
+        existing: resolvedPrimaryUser,
+        key: parsed.attributeKey!,
+        value: parsed.attributeValue!,
+      );
+      message = _ownerProfileUpdateMessage(
+        key: parsed.attributeKey!,
+        value: parsed.attributeValue!,
+        updatedUser: updatedUser,
+      );
+    } else if (parsed.canCreateAttribute) {
       final subjectUri = parsed.subjectUri!.toString();
       final now = DateTime.now();
       final subjectLabel = parsed.subjectName ?? subjectUri;
@@ -763,7 +786,12 @@ class DojoService {
     required ParsedInput fallback,
     required LlmExtraction extraction,
   }) {
-    if (!extraction.canCreateAttribute && !extraction.isQuery) {
+    final hasOwnerProfileFact = extraction.isOwnerProfile &&
+        extraction.attributeKey != null &&
+        extraction.attributeValue != null;
+    if (!extraction.canCreateAttribute &&
+        !extraction.isQuery &&
+        !hasOwnerProfileFact) {
       return fallback;
     }
 
@@ -777,6 +805,7 @@ class DojoService {
       attributeValue: extraction.attributeValue,
       isQuery: extraction.isQuery,
       confidence: extraction.confidence > 0 ? extraction.confidence : fallback.confidence,
+      isOwnerProfile: extraction.isOwnerProfile,
       originalText: input,
     );
   }
@@ -1039,6 +1068,22 @@ class DojoService {
     }
 
     final asksAboutSelf = RegExp(r'\bmy\b', caseSensitive: false).hasMatch(query);
+    final ownerProfileFacts = <String, String>{};
+    if (primaryUser != null) {
+      ownerProfileFacts['display_name'] = primaryUser.displayName;
+      final preferred = primaryUser.preferredName?.trim();
+      if (preferred != null && preferred.isNotEmpty) {
+        ownerProfileFacts['preferred_name'] = preferred;
+      }
+      for (final entry in primaryUser.profile.entries) {
+        final key = UriUtils.nameToIdentifier(entry.key);
+        final value = entry.value?.toString().trim();
+        if (value == null || value.isEmpty) {
+          continue;
+        }
+        ownerProfileFacts[key] = value;
+      }
+    }
     final ownerRecords = <Record>[];
     final ownerAttributes = <Attribute>[];
     if (asksAboutSelf && primaryUser != null) {
@@ -1086,6 +1131,16 @@ class DojoService {
       contextLines.add(line);
       factLines.add(line);
       addSource(directRecord.uri, 'display_name');
+    }
+
+    if (asksAboutSelf && ownerProfileFacts.isNotEmpty) {
+      for (final entry in ownerProfileFacts.entries.take(12)) {
+        final line = '- Owner profile: ${entry.key} = '
+            '${_truncateForPrompt(entry.value, 120)}';
+        contextLines.add(line);
+        factLines.add(line);
+        addSource(_ownerProfileTargetUri, entry.key);
+      }
     }
 
     if (asksAboutSelf && ownerRecords.isNotEmpty) {
@@ -1163,68 +1218,86 @@ class DojoService {
     }
 
     String? directAnswer;
-    if (asksAboutSelf &&
+    final relationshipTerm = _extractRelationshipTerm(normalizedQuery);
+    final asksForName = normalizedQuery.contains('name') ||
+        normalizedQuery.startsWith('who') ||
+        RegExp(r'\bwho\b').hasMatch(normalizedQuery);
+
+    if (relationshipTerm != null && asksForName) {
+      var relationshipFacts = attrsBySearch
+          .where((a) => a.key == 'relationship_to_user')
+          .toList(growable: false);
+      if (relationshipFacts.isEmpty) {
+        relationshipFacts =
+            await _attributeRepository.getByKey('relationship_to_user');
+      }
+      for (final rel in relationshipFacts) {
+        final value = (rel.value ?? '').toLowerCase();
+        if (!value.contains(relationshipTerm)) {
+          continue;
+        }
+        final relatedRecord = recordCache[rel.subjectUri] ??
+            await _recordRepository.getByUri(rel.subjectUri);
+        if (relatedRecord != null) {
+          addRecordCandidate(relatedRecord);
+        }
+        final relationshipLabel =
+            relationshipTerm == 'fiancee' ? 'fiancee' : relationshipTerm;
+        directAnswer = relatedRecord != null
+            ? 'Your $relationshipLabel is ${relatedRecord.displayName}.'
+            : 'Your $relationshipLabel is ${rel.subjectUri}.';
+        addSource(rel.subjectUri, rel.key);
+        if (relatedRecord != null) {
+          addSource(relatedRecord.uri, 'display_name');
+        }
+        break;
+      }
+    }
+
+    if (directAnswer == null &&
+        asksAboutSelf &&
         (normalizedQuery.contains('address') || normalizedQuery == 'address')) {
+      String? ownerAddressValue = ownerProfileFacts['address'];
       Attribute? ownerAddress;
-      for (final attr in ownerAttributes) {
-        if (attr.key == 'address' &&
-            (attr.value?.trim().isNotEmpty ?? false)) {
-          ownerAddress = attr;
-          break;
+      if (ownerAddressValue == null || ownerAddressValue.isEmpty) {
+        for (final attr in ownerAttributes) {
+          if (attr.key == 'address' &&
+              (attr.value?.trim().isNotEmpty ?? false)) {
+            ownerAddress = attr;
+            ownerAddressValue = attr.value;
+            break;
+          }
         }
       }
-      if (ownerAddress == null) {
+      if ((ownerAddressValue == null || ownerAddressValue.isEmpty) &&
+          ownerAddress == null) {
         for (final attr in attrsBySearch) {
           if (attr.key == 'address' &&
               (attr.value?.trim().isNotEmpty ?? false)) {
             ownerAddress = attr;
+            ownerAddressValue = attr.value;
             break;
           }
         }
       }
 
-      if (ownerAddress != null && ownerAddress.value != null) {
-        directAnswer = 'Your address is ${ownerAddress.value}.';
-        addSource(ownerAddress.subjectUri, ownerAddress.key);
+      if (ownerAddressValue != null && ownerAddressValue.isNotEmpty) {
+        directAnswer = 'Your address is $ownerAddressValue.';
+        if (ownerAddress != null) {
+          addSource(ownerAddress.subjectUri, ownerAddress.key);
+        } else {
+          addSource(_ownerProfileTargetUri, 'address');
+        }
       }
     }
 
-    if (directAnswer == null) {
-      final relationshipTerm = _extractRelationshipTerm(normalizedQuery);
-      final asksForName = normalizedQuery.contains('name') ||
-          normalizedQuery.startsWith('who') ||
-          RegExp(r'\bwho\b').hasMatch(normalizedQuery);
-      if (relationshipTerm != null && asksForName) {
-        var relationshipFacts = attrsBySearch
-            .where((a) => a.key == 'relationship_to_user')
-            .toList(growable: false);
-        if (relationshipFacts.isEmpty) {
-          relationshipFacts =
-              await _attributeRepository.getByKey('relationship_to_user');
-        }
-        for (final rel in relationshipFacts) {
-          final value = (rel.value ?? '').toLowerCase();
-          if (!value.contains(relationshipTerm)) {
-            continue;
-          }
-          final relatedRecord = recordCache[rel.subjectUri] ??
-              await _recordRepository.getByUri(rel.subjectUri);
-          if (relatedRecord != null) {
-            addRecordCandidate(relatedRecord);
-          }
-          final relationshipLabel = relationshipTerm == 'fiancee'
-              ? 'fiancee'
-              : relationshipTerm;
-          directAnswer = relatedRecord != null
-              ? 'Your $relationshipLabel is ${relatedRecord.displayName}.'
-              : 'Your $relationshipLabel is ${rel.subjectUri}.';
-          addSource(rel.subjectUri, rel.key);
-          if (relatedRecord != null) {
-            addSource(relatedRecord.uri, 'display_name');
-          }
-          break;
-        }
-      }
+    if (directAnswer == null &&
+        asksAboutSelf &&
+        relationshipTerm == null &&
+        asksForName &&
+        primaryUser != null) {
+      directAnswer = 'Your name is ${primaryUser.senseiNameHint}.';
+      addSource(_ownerProfileTargetUri, 'display_name');
     }
 
     if (contextLines.isEmpty) {
@@ -2199,8 +2272,22 @@ class DojoService {
     'wife',
     'husband',
     'partner',
+    'fiance',
     'fiancee',
   ];
+
+  static const Set<String> _ownerDisplayNameKeys = <String>{
+    'name',
+    'display_name',
+    'full_name',
+    'legal_name',
+  };
+
+  static const Set<String> _ownerPreferredNameKeys = <String>{
+    'preferred_name',
+    'nickname',
+    'call_me',
+  };
 
   static const String _journalRecallSystemInstruction =
       'You are Sensei answering recall questions from journal context only. '
@@ -2577,6 +2664,60 @@ class DojoService {
       parts.add('locale: $locale');
     }
     return parts.join(', ');
+  }
+
+  Future<UserProfile> _applyOwnerProfileFact({
+    required UserProfile? existing,
+    required String key,
+    required String value,
+  }) async {
+    final normalizedKey = UriUtils.nameToIdentifier(key);
+    final trimmedValue = value.trim();
+    final now = DateTime.now().toUtc();
+
+    final current = existing ??
+        UserProfile(
+          userId: UserProfile.primaryUserId,
+          displayName: 'Dojo User',
+          createdAt: now,
+          updatedAt: now,
+        );
+
+    var displayName = current.displayName;
+    var preferredName = current.preferredName;
+    final profilePayload = Map<String, dynamic>.from(current.profile);
+
+    if (_ownerDisplayNameKeys.contains(normalizedKey)) {
+      displayName = trimmedValue;
+    } else if (_ownerPreferredNameKeys.contains(normalizedKey)) {
+      preferredName = trimmedValue;
+    } else {
+      profilePayload[normalizedKey] = trimmedValue;
+    }
+
+    return upsertPrimaryUserProfile(
+      displayName: displayName,
+      preferredName: preferredName,
+      profile: profilePayload,
+    );
+  }
+
+  String _ownerProfileUpdateMessage({
+    required String key,
+    required String value,
+    required UserProfile updatedUser,
+  }) {
+    final normalizedKey = UriUtils.nameToIdentifier(key);
+    if (_ownerDisplayNameKeys.contains(normalizedKey)) {
+      return 'Updated your profile name to ${updatedUser.displayName}.';
+    }
+    if (_ownerPreferredNameKeys.contains(normalizedKey)) {
+      final preferred = updatedUser.preferredName?.trim();
+      if (preferred != null && preferred.isNotEmpty) {
+        return 'Updated your preferred name to $preferred.';
+      }
+    }
+    return 'Updated your profile ${_formatKey(normalizedKey)} to $value.';
   }
 
   Future<UserProfile?> _getPrimaryUserProfile() async {
