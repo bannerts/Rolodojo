@@ -415,13 +415,29 @@ class DojoService {
     final responseType = _resolveJournalResponseType(trimmed);
     late final String responseText;
     if (responseType == JournalEntryType.dailySummary) {
-      responseText = await _buildDailySummaryBlock(now);
+      responseText = await _buildDailySummaryBlock(
+        now,
+        requestPrompt: trimmed,
+        primaryUser: primaryUser,
+      );
     } else if (responseType == JournalEntryType.weeklySummary) {
-      responseText = await _buildWeeklySummaryBlock(now);
+      responseText = await _buildWeeklySummaryBlock(
+        now,
+        requestPrompt: trimmed,
+        primaryUser: primaryUser,
+      );
     } else if (responseType == JournalEntryType.recall) {
-      responseText = _buildJournalRecallResponse(trimmed, sourceEntries);
+      responseText = await _buildJournalRecallResponse(
+        trimmed,
+        sourceEntries,
+        primaryUser: primaryUser,
+      );
     } else {
-      responseText = _buildJournalFollowUpResponse(sourceEntries);
+      responseText = await _buildJournalFollowUpResponse(
+        trimmed,
+        sourceEntries,
+        primaryUser: primaryUser,
+      );
     }
 
     final senseiEntry = JournalEntry(
@@ -498,7 +514,13 @@ class DojoService {
       return null;
     }
     final targetDay = day ?? DateTime.now();
-    final summaryText = await _buildDailySummaryBlock(targetDay);
+    final primaryUser = _userRepository != null
+        ? await _userRepository!.getPrimary()
+        : null;
+    final summaryText = await _buildDailySummaryBlock(
+      targetDay,
+      primaryUser: primaryUser,
+    );
     final entry = JournalEntry(
       id: _uuid.v4(),
       journalDate: _journalDayKey(targetDay),
@@ -522,7 +544,13 @@ class DojoService {
     }
     final anchor = anchorDay ?? DateTime.now();
     final weekStart = _startOfWeek(anchor);
-    final summaryText = await _buildWeeklySummaryBlock(anchor);
+    final primaryUser = _userRepository != null
+        ? await _userRepository!.getPrimary()
+        : null;
+    final summaryText = await _buildWeeklySummaryBlock(
+      anchor,
+      primaryUser: primaryUser,
+    );
     final entry = JournalEntry(
       id: _uuid.v4(),
       journalDate: _journalDayKey(weekStart),
@@ -736,7 +764,25 @@ class DojoService {
     return JournalEntryType.followUp;
   }
 
-  String _buildJournalFollowUpResponse(List<JournalEntry> dayEntries) {
+  Future<String> _buildJournalFollowUpResponse(
+    String input,
+    List<JournalEntry> dayEntries, {
+    required UserProfile? primaryUser,
+  }) async {
+    final llmResponse = await _tryLlmJournalResponse(
+      prompt:
+          'New journal entry: "$input"\nRespond as Sensei with one useful '
+          'follow-up that improves day journaling quality.',
+      contextEntries: dayEntries,
+      primaryUser: primaryUser,
+      systemInstruction: _journalFollowUpSystemInstruction,
+      maxTokens: 240,
+      temperature: 0.25,
+    );
+    if (llmResponse != null) {
+      return llmResponse;
+    }
+
     final insights = _extractJournalInsights(dayEntries);
     final followUps = <String>[];
     if (!insights.hasMood) {
@@ -767,10 +813,23 @@ class DojoService {
         'you want future-you to remember?$highlightBlock';
   }
 
-  String _buildJournalRecallResponse(
+  Future<String> _buildJournalRecallResponse(
     String input,
-    List<JournalEntry> dayEntries,
-  ) {
+    List<JournalEntry> dayEntries, {
+    required UserProfile? primaryUser,
+  }) async {
+    final llmResponse = await _tryLlmJournalResponse(
+      prompt: 'User question about today\'s journal: "$input"',
+      contextEntries: dayEntries,
+      primaryUser: primaryUser,
+      systemInstruction: _journalRecallSystemInstruction,
+      maxTokens: 260,
+      temperature: 0.15,
+    );
+    if (llmResponse != null) {
+      return llmResponse;
+    }
+
     final lower = input.toLowerCase();
     final insights = _extractJournalInsights(dayEntries);
     if (!insights.hasAnyData) {
@@ -805,8 +864,27 @@ class DojoService {
     return 'So far today, here is what you logged:\n$summaryLines';
   }
 
-  Future<String> _buildDailySummaryBlock(DateTime day) async {
+  Future<String> _buildDailySummaryBlock(
+    DateTime day, {
+    String? requestPrompt,
+    UserProfile? primaryUser,
+  }) async {
     final entries = await getJournalEntriesForDate(day, limit: 800);
+    final llmSummary = await _tryLlmJournalResponse(
+      prompt: requestPrompt?.trim().isNotEmpty == true
+          ? requestPrompt!.trim()
+          : 'Generate a clean end-of-day journal summary block.',
+      contextEntries: entries,
+      primaryUser: primaryUser,
+      systemInstruction:
+          '${_journalSummarySystemInstruction}\nSummary date: ${_journalDayKey(day)}',
+      maxTokens: 520,
+      temperature: 0.2,
+    );
+    if (llmSummary != null) {
+      return llmSummary;
+    }
+
     final insights = _extractJournalInsights(entries);
     final userCount = entries.where((e) => e.role == JournalRole.user).length;
     final senseiCount = entries.where((e) => e.role == JournalRole.sensei).length;
@@ -866,10 +944,30 @@ class DojoService {
     return buffer.toString().trimRight();
   }
 
-  Future<String> _buildWeeklySummaryBlock(DateTime anchorDay) async {
+  Future<String> _buildWeeklySummaryBlock(
+    DateTime anchorDay, {
+    String? requestPrompt,
+    UserProfile? primaryUser,
+  }) async {
     final weekStart = _startOfWeek(anchorDay);
     final weekEnd = weekStart.add(const Duration(days: 6));
     final weekEntries = await getJournalEntriesForWeek(anchorDay, limit: 1600);
+
+    final llmSummary = await _tryLlmJournalResponse(
+      prompt: requestPrompt?.trim().isNotEmpty == true
+          ? requestPrompt!.trim()
+          : 'Generate a weekly journal summary across the provided entries.',
+      contextEntries: weekEntries,
+      primaryUser: primaryUser,
+      systemInstruction:
+          '${_journalWeeklySystemInstruction}\nWeek range: '
+          '${_journalDayKey(weekStart)} to ${_journalDayKey(weekEnd)}',
+      maxTokens: 620,
+      temperature: 0.2,
+    );
+    if (llmSummary != null) {
+      return llmSummary;
+    }
 
     final byDate = <String, List<JournalEntry>>{};
     for (final entry in weekEntries) {
@@ -936,6 +1034,103 @@ class DojoService {
 
     return buffer.toString().trimRight();
   }
+
+  Future<String?> _tryLlmJournalResponse({
+    required String prompt,
+    required List<JournalEntry> contextEntries,
+    required UserProfile? primaryUser,
+    required String systemInstruction,
+    int maxTokens = 280,
+    double temperature = 0.2,
+  }) async {
+    final llm = _senseiLlm;
+    if (llm == null) {
+      return null;
+    }
+
+    final entriesContext = _buildJournalContextBlock(contextEntries);
+    if (entriesContext.isEmpty) {
+      return null;
+    }
+    final userProfile = _buildUserProfileSummary(primaryUser);
+    final contextBlock = userProfile == null
+        ? entriesContext
+        : '- User profile: $userProfile\n$entriesContext';
+
+    try {
+      final response = await llm.answerWithContext(
+        prompt: prompt,
+        context: contextBlock,
+        systemInstruction: systemInstruction,
+        maxTokens: maxTokens,
+        temperature: temperature,
+      );
+      final normalized = response.trim();
+      return normalized.isEmpty ? null : normalized;
+    } catch (e) {
+      debugPrint('[DojoService] Journal LLM response failed: $e');
+      return null;
+    }
+  }
+
+  String _buildJournalContextBlock(List<JournalEntry> entries) {
+    if (entries.isEmpty) {
+      return '';
+    }
+
+    final normalizedEntries = [...entries]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final lines = <String>[];
+    var added = 0;
+    for (final entry in normalizedEntries) {
+      if (entry.entryType == JournalEntryType.weeklySummary ||
+          entry.entryType == JournalEntryType.dailySummary) {
+        continue;
+      }
+      final content = entry.content.trim();
+      if (content.isEmpty) {
+        continue;
+      }
+      final author = entry.role == JournalRole.user ? 'User' : 'Sensei';
+      lines.add(
+        '- ${entry.journalDate} ${_formatRoloTime(entry.createdAt)} '
+        '[$author/${entry.entryType.value}]: '
+        '${_truncateForPrompt(content, 220)}',
+      );
+      if (++added >= 40) {
+        break;
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  static const String _journalFollowUpSystemInstruction =
+      'You are Sensei in Journal Mode. Coach the user to capture high-value '
+      'day details. Prioritize missing: mood shifts, people interactions, '
+      'places visited, and key events. Keep response short and practical.';
+
+  static const String _journalRecallSystemInstruction =
+      'You are Sensei answering recall questions from journal context only. '
+      'Do not invent facts. If missing, explicitly say the journal does not '
+      'contain that detail yet.';
+
+  static const String _journalSummarySystemInstruction =
+      'Create a clean daily journal summary block. Include sections:\n'
+      '1) Mood through the day\n'
+      '2) People and interactions\n'
+      '3) Places visited\n'
+      '4) Key events/highlights\n'
+      '5) One reflection prompt for tomorrow.\n'
+      'Stay grounded strictly in provided context.';
+
+  static const String _journalWeeklySystemInstruction =
+      'Create a weekly journal summary from context only. Include:\n'
+      '1) Overall mood trends\n'
+      '2) Most frequent people interactions\n'
+      '3) Places/patterns across the week\n'
+      '4) Daily bullets where available\n'
+      '5) Recommended focus for next week.';
 
   _JournalInsights _extractJournalInsights(List<JournalEntry> entries) {
     final moods = <String>{};

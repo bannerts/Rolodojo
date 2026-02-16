@@ -182,6 +182,7 @@ abstract class SenseiLlmService {
   bool get isReady;
   String get baseUrl;
   String get configuredModelName;
+  String configuredModelFor(LlmProvider provider);
   String get activeModelName;
   LlmProvider get currentProvider;
   List<LlmProvider> get supportedProviders;
@@ -196,6 +197,7 @@ abstract class SenseiLlmService {
 
   Future<void> selectProvider(LlmProvider provider);
   Future<void> setApiKey(LlmProvider provider, String apiKey);
+  Future<void> setConfiguredModel(LlmProvider provider, String modelName);
   Future<LlmHealthStatus> checkHealth({bool force = false});
 
   Future<LlmExtraction> parseInput(
@@ -218,6 +220,15 @@ abstract class SenseiLlmService {
     String? userProfileSummary,
   });
 
+  /// Answers a prompt grounded in an arbitrary context block.
+  Future<String> answerWithContext({
+    required String prompt,
+    required String context,
+    String? systemInstruction,
+    int maxTokens = 280,
+    double temperature = 0.2,
+  });
+
   Future<String> summarize(String text, {int maxLength = 50});
   Future<void> dispose();
 }
@@ -235,6 +246,7 @@ abstract class SenseiLlmService {
 class LocalLlmService implements SenseiLlmService {
   static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
   static const String _apiKeyStoragePrefix = 'sensei_provider_api_key_';
+  static const String _modelStoragePrefix = 'sensei_provider_model_';
 
   LocalLlmService({
     LlmProvider initialProvider = LlmProvider.localLlama,
@@ -263,6 +275,7 @@ class LocalLlmService implements SenseiLlmService {
       LlmProvider.localLlama: _ProviderConfig(
         baseUri: _normalizeOpenAiBaseUri(localBaseUrl, defaultBase: 'http://localhost:11434/v1'),
         configuredModel: _trimOrDefault(localModel, 'llama3.3'),
+        defaultConfiguredModel: _trimOrDefault(localModel, 'llama3.3'),
         apiKey: '',
         fallbackModels: localFallbackModels
             .map((m) => m.trim())
@@ -276,6 +289,10 @@ class LocalLlmService implements SenseiLlmService {
           requiredSuffix: '/v1',
         ),
         configuredModel: _trimOrDefault(claudeModel, 'claude-3-5-sonnet-latest'),
+        defaultConfiguredModel: _trimOrDefault(
+          claudeModel,
+          'claude-3-5-sonnet-latest',
+        ),
         apiKey: claudeApiKey.trim(),
       ),
       LlmProvider.grok: _ProviderConfig(
@@ -284,6 +301,7 @@ class LocalLlmService implements SenseiLlmService {
           defaultBase: 'https://api.x.ai/v1',
         ),
         configuredModel: _trimOrDefault(grokModel, 'grok-2-latest'),
+        defaultConfiguredModel: _trimOrDefault(grokModel, 'grok-2-latest'),
         apiKey: grokApiKey.trim(),
       ),
       LlmProvider.gemini: _ProviderConfig(
@@ -293,6 +311,7 @@ class LocalLlmService implements SenseiLlmService {
           requiredSuffix: '/v1beta',
         ),
         configuredModel: _trimOrDefault(geminiModel, 'gemini-1.5-flash'),
+        defaultConfiguredModel: _trimOrDefault(geminiModel, 'gemini-1.5-flash'),
         apiKey: geminiApiKey.trim(),
       ),
       LlmProvider.chatGpt: _ProviderConfig(
@@ -301,6 +320,7 @@ class LocalLlmService implements SenseiLlmService {
           defaultBase: 'https://api.openai.com/v1',
         ),
         configuredModel: _trimOrDefault(chatGptModel, 'gpt-4o-mini'),
+        defaultConfiguredModel: _trimOrDefault(chatGptModel, 'gpt-4o-mini'),
         apiKey: chatGptApiKey.trim(),
       ),
     };
@@ -336,6 +356,15 @@ class LocalLlmService implements SenseiLlmService {
   String get configuredModelName => _activeConfig.configuredModel;
 
   @override
+  String configuredModelFor(LlmProvider provider) {
+    final config = _providerConfigs[provider];
+    if (config == null) {
+      return '';
+    }
+    return config.configuredModel;
+  }
+
+  @override
   String get activeModelName =>
       _activeModels[_currentProvider] ?? _activeConfig.configuredModel;
 
@@ -364,6 +393,7 @@ class LocalLlmService implements SenseiLlmService {
     int threads = 4,
   }) async {
     await _hydrateApiKeysFromStorage();
+    await _hydrateModelsFromStorage();
     debugPrint(
       '[Sensei LLM] Initializing provider=${_currentProvider.label} '
       'endpoint=$baseUrl configuredModel=$configuredModelName marker=$modelPath',
@@ -404,6 +434,34 @@ class LocalLlmService implements SenseiLlmService {
       await _secureStorage.delete(key: storageKey);
     } else {
       await _secureStorage.write(key: storageKey, value: sanitized);
+    }
+
+    _lastHealthCheck = null;
+    _lastHealthProvider = null;
+    if (_currentProvider == provider) {
+      await checkHealth(force: true);
+    }
+  }
+
+  @override
+  Future<void> setConfiguredModel(LlmProvider provider, String modelName) async {
+    final config = _providerConfigs[provider];
+    if (config == null) {
+      return;
+    }
+
+    final sanitized = modelName.trim();
+    final nextModel = sanitized.isEmpty
+        ? config.defaultConfiguredModel
+        : sanitized;
+    config.configuredModel = nextModel;
+    _activeModels.remove(provider);
+
+    final storageKey = _modelStorageKey(provider);
+    if (nextModel == config.defaultConfiguredModel) {
+      await _secureStorage.delete(key: storageKey);
+    } else {
+      await _secureStorage.write(key: storageKey, value: nextModel);
     }
 
     _lastHealthCheck = null;
@@ -750,6 +808,46 @@ class LocalLlmService implements SenseiLlmService {
     } catch (e) {
       await _onRequestFailure(e);
       return _ruleBasedVaultAnswer(trimmedQuestion, context);
+    }
+  }
+
+  @override
+  Future<String> answerWithContext({
+    required String prompt,
+    required String context,
+    String? systemInstruction,
+    int maxTokens = 280,
+    double temperature = 0.2,
+  }) async {
+    final trimmedPrompt = prompt.trim();
+    if (trimmedPrompt.isEmpty) {
+      return '';
+    }
+
+    final health = await checkHealth();
+    if (!health.isHealthy) {
+      return '';
+    }
+
+    final contextBlock = context.trim().isEmpty
+        ? '- No context provided.'
+        : context.trim();
+    final instruction = (systemInstruction ?? '').trim();
+    final system = instruction.isEmpty
+        ? '$_senseiCorePrompt\n$_contextAnswerSystemPrompt'
+        : '$_senseiCorePrompt\n$instruction';
+
+    try {
+      final result = await _createCompletion(
+        systemPrompt: system,
+        userPrompt: 'Context:\n$contextBlock\n\nPrompt: "$trimmedPrompt"',
+        maxTokens: maxTokens,
+        temperature: temperature,
+      );
+      return result.trim();
+    } catch (e) {
+      await _onRequestFailure(e);
+      return '';
     }
   }
 
@@ -1253,8 +1351,35 @@ class LocalLlmService implements SenseiLlmService {
     }
   }
 
+  Future<void> _hydrateModelsFromStorage() async {
+    for (final provider in LlmProvider.values) {
+      final config = _providerConfigs[provider];
+      if (config == null) {
+        continue;
+      }
+
+      try {
+        final storedModel = await _secureStorage.read(
+          key: _modelStorageKey(provider),
+        );
+        final sanitized = storedModel?.trim() ?? '';
+        if (sanitized.isNotEmpty) {
+          config.configuredModel = sanitized;
+        }
+      } catch (e) {
+        debugPrint(
+          '[Sensei LLM] Failed to read stored model for ${provider.label}: $e',
+        );
+      }
+    }
+  }
+
   String _apiKeyStorageKey(LlmProvider provider) {
     return '$_apiKeyStoragePrefix${provider.id}';
+  }
+
+  String _modelStorageKey(LlmProvider provider) {
+    return '$_modelStoragePrefix${provider.id}';
   }
 
   String _buildExtractionPrompt(String input, LlmParsingContext context) {
@@ -1328,6 +1453,10 @@ Rules:
 - Do not invent facts not present in the context.
 - If information is missing, explicitly say it is not found in the vault.
 - Keep answers direct and practical.''';
+
+  static const _contextAnswerSystemPrompt =
+      'Answer the prompt grounded in the provided context only. '
+      'If context is insufficient, say so clearly.';
 
   static const _summarySystemPrompt =
       'Summarize briefly without adding unverified details.';
@@ -1579,13 +1708,15 @@ Rules:
 
 class _ProviderConfig {
   final Uri baseUri;
-  final String configuredModel;
+  String configuredModel;
+  final String defaultConfiguredModel;
   String apiKey;
   final List<String> fallbackModels;
 
   _ProviderConfig({
     required this.baseUri,
     required this.configuredModel,
+    required this.defaultConfiguredModel,
     required this.apiKey,
     this.fallbackModels = const [],
   });
