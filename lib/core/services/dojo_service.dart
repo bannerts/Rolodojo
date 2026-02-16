@@ -824,7 +824,7 @@ class DojoService {
     );
     final placePattern = RegExp(
       r'\b(?:at|to|in|visited|went to|drove to|walked to)\s+'
-      r'([A-Za-z][A-Za-z0-9\'\-\s]{1,40})',
+      r"([A-Za-z][A-Za-z0-9'\-\s]{1,40})",
       caseSensitive: false,
     );
 
