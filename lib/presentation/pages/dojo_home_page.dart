@@ -6,6 +6,7 @@ import '../../core/dojo_provider.dart';
 import '../../core/services/sensei_llm_service.dart';
 import '../../core/services/synthesis_service.dart';
 import '../../domain/entities/attribute.dart';
+import '../../domain/entities/journal_entry.dart';
 import '../../domain/entities/rolo.dart';
 import '../widgets/flip_card.dart';
 import '../widgets/sensei_bar.dart';
@@ -25,8 +26,12 @@ class DojoHomePage extends StatefulWidget {
 
 class _DojoHomePageState extends State<DojoHomePage> {
   SenseiState _senseiState = SenseiState.idle;
+  bool _journalMode = false;
   List<Rolo> _recentRolos = [];
+  List<JournalEntry> _journalEntries = [];
   bool _isLoading = true;
+  bool _isJournalLoading = false;
+  bool _isGeneratingJournalSummary = false;
   String? _lastSynthesisMessage;
   List<SynthesisSuggestion> _pendingSuggestions = [];
   SenseiLlmService? _senseiLlm;
@@ -91,6 +96,33 @@ class _DojoHomePageState extends State<DojoHomePage> {
     }
   }
 
+  Future<void> _setJournalMode(bool enabled) async {
+    if (_journalMode == enabled) return;
+    setState(() {
+      _journalMode = enabled;
+      _senseiState = SenseiState.idle;
+    });
+    if (enabled) {
+      await _loadRecentJournalEntries();
+    } else {
+      await _loadRecentRolos();
+    }
+  }
+
+  Future<void> _loadRecentJournalEntries() async {
+    if (!mounted) return;
+    setState(() {
+      _isJournalLoading = true;
+    });
+    final dojo = DojoProvider.of(context).dojoService;
+    final entries = await dojo.getRecentJournalEntries(limit: 250);
+    if (!mounted) return;
+    setState(() {
+      _journalEntries = entries;
+      _isJournalLoading = false;
+    });
+  }
+
   Future<void> _handleSummon(String text) async {
     setState(() {
       _senseiState = SenseiState.thinking;
@@ -141,6 +173,95 @@ class _DojoHomePageState extends State<DojoHomePage> {
             backgroundColor: DojoColors.alert,
           ),
         );
+      }
+    }
+  }
+
+  Future<void> _handleJournalSummon(String text) async {
+    setState(() {
+      _senseiState = SenseiState.thinking;
+    });
+
+    try {
+      final dojo = DojoProvider.of(context).dojoService;
+      await dojo.processJournalEntry(text);
+      await _loadRecentJournalEntries();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Journal error: $e'),
+            backgroundColor: DojoColors.alert,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _senseiState = SenseiState.idle;
+        });
+      }
+    }
+  }
+
+  Future<void> _generateDailySummary() async {
+    if (_isGeneratingJournalSummary) return;
+    setState(() => _isGeneratingJournalSummary = true);
+    try {
+      final dojo = DojoProvider.of(context).dojoService;
+      await dojo.generateDailyJournalSummary();
+      await _loadRecentJournalEntries();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Daily journal summary added'),
+            backgroundColor: DojoColors.graphite,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Daily summary failed: $e'),
+            backgroundColor: DojoColors.alert,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isGeneratingJournalSummary = false);
+      }
+    }
+  }
+
+  Future<void> _generateWeeklySummary() async {
+    if (_isGeneratingJournalSummary) return;
+    setState(() => _isGeneratingJournalSummary = true);
+    try {
+      final dojo = DojoProvider.of(context).dojoService;
+      await dojo.generateWeeklyJournalSummary();
+      await _loadRecentJournalEntries();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Weekly journal summary added'),
+            backgroundColor: DojoColors.graphite,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Weekly summary failed: $e'),
+            backgroundColor: DojoColors.alert,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isGeneratingJournalSummary = false);
       }
     }
   }
@@ -203,7 +324,8 @@ class _DojoHomePageState extends State<DojoHomePage> {
         children: [
           if (_llmHealthStatus.checkedAt != null && !_llmHealthStatus.isHealthy)
             _buildLlmHealthBanner(),
-          if (_lastSynthesisMessage != null)
+          _buildModeToggle(),
+          if (!_journalMode && _lastSynthesisMessage != null)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(
@@ -225,24 +347,324 @@ class _DojoHomePageState extends State<DojoHomePage> {
               ),
             ),
           // Synthesis suggestion cards
-          if (_pendingSuggestions.isNotEmpty)
+          if (!_journalMode && _pendingSuggestions.isNotEmpty)
             _buildSuggestionBanner(),
+          if (_journalMode) _buildJournalModeBanner(),
           Expanded(
-            child: _isLoading
-                ? const Center(
-                    child: CircularProgressIndicator(color: DojoColors.senseiGold),
-                  )
-                : _recentRolos.isEmpty
-                    ? _buildEmptyState()
-                    : _buildStream(),
+            child: _journalMode
+                ? (_isJournalLoading
+                    ? const Center(
+                        child: CircularProgressIndicator(
+                          color: DojoColors.senseiGold,
+                        ),
+                      )
+                    : _buildJournalStream())
+                : (_isLoading
+                    ? const Center(
+                        child: CircularProgressIndicator(
+                          color: DojoColors.senseiGold,
+                        ),
+                      )
+                    : _recentRolos.isEmpty
+                        ? _buildEmptyState()
+                        : _buildStream()),
           ),
           SenseiBar(
             state: _senseiState,
-            onSubmit: _handleSummon,
+            onSubmit: _journalMode ? _handleJournalSummon : _handleSummon,
+            hintText: _journalMode
+                ? 'Journal your day... mood, people, places'
+                : 'Summon the Sensei...',
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildModeToggle() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(
+        DojoDimens.paddingMedium,
+        DojoDimens.paddingSmall,
+        DojoDimens.paddingMedium,
+        DojoDimens.paddingSmall,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: ChoiceChip(
+              label: const Text('Dojo Mode'),
+              selected: !_journalMode,
+              onSelected: (_) => _setJournalMode(false),
+              selectedColor: DojoColors.senseiGold.withOpacity(0.2),
+              labelStyle: TextStyle(
+                color: !_journalMode
+                    ? DojoColors.senseiGold
+                    : DojoColors.textSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: ChoiceChip(
+              label: const Text('Journal Mode'),
+              selected: _journalMode,
+              onSelected: (_) => _setJournalMode(true),
+              selectedColor: DojoColors.success.withOpacity(0.16),
+              labelStyle: TextStyle(
+                color: _journalMode ? DojoColors.success : DojoColors.textSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildJournalModeBanner() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: DojoDimens.paddingMedium),
+      padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+      decoration: BoxDecoration(
+        color: DojoColors.graphite,
+        borderRadius: BorderRadius.circular(DojoDimens.cardRadius),
+        border: Border.all(color: DojoColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.menu_book_outlined, color: DojoColors.success, size: 16),
+              SizedBox(width: 8),
+              Text(
+                'Journal Mode',
+                style: TextStyle(
+                  color: DojoColors.textPrimary,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Sensei will collect mood, people, and places as your day unfolds.',
+            style: TextStyle(color: DojoColors.textHint, fontSize: 12),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed:
+                    _isGeneratingJournalSummary ? null : _generateDailySummary,
+                icon: const Icon(Icons.summarize_outlined, size: 16),
+                label: const Text('Summarize Today'),
+              ),
+              OutlinedButton.icon(
+                onPressed:
+                    _isGeneratingJournalSummary ? null : _generateWeeklySummary,
+                icon: const Icon(Icons.calendar_view_week_outlined, size: 16),
+                label: const Text('Weekly Summary'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildJournalStream() {
+    if (_journalEntries.isEmpty) {
+      return _buildJournalEmptyState();
+    }
+
+    final entries = [..._journalEntries]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+      itemCount: entries.length,
+      itemBuilder: (context, index) {
+        final entry = entries[index];
+        final previousDate =
+            index > 0 ? entries[index - 1].journalDate : null;
+        final showDateHeader = entry.journalDate != previousDate;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (showDateHeader)
+              Padding(
+                padding: const EdgeInsets.only(
+                  top: DojoDimens.paddingSmall,
+                  bottom: DojoDimens.paddingSmall,
+                ),
+                child: Text(
+                  _formatJournalDate(entry.journalDate),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: DojoColors.textHint,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ),
+            _buildJournalEntryCard(entry),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildJournalEntryCard(JournalEntry entry) {
+    final isUser = entry.role == JournalRole.user;
+    final isSummary = entry.entryType == JournalEntryType.dailySummary ||
+        entry.entryType == JournalEntryType.weeklySummary;
+
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 520),
+        margin: const EdgeInsets.only(bottom: DojoDimens.paddingSmall),
+        padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+        decoration: BoxDecoration(
+          color: isUser
+              ? DojoColors.senseiGold.withOpacity(0.12)
+              : DojoColors.graphite,
+          borderRadius: BorderRadius.circular(DojoDimens.cardRadius),
+          border: Border.all(
+            color: isSummary
+                ? DojoColors.success.withOpacity(0.45)
+                : DojoColors.border,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment:
+              isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  isUser ? Icons.person_outline : Icons.self_improvement_outlined,
+                  size: 12,
+                  color: isUser ? DojoColors.senseiGold : DojoColors.success,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  isUser ? 'You' : 'Sensei',
+                  style: TextStyle(
+                    color: isUser ? DojoColors.senseiGold : DojoColors.success,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _formatJournalType(entry.entryType),
+                  style: const TextStyle(
+                    color: DojoColors.textHint,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SelectableText(
+              entry.content,
+              style: const TextStyle(
+                color: DojoColors.textPrimary,
+                fontSize: 13,
+                height: 1.35,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _formatClockTime(entry.createdAt),
+              style: const TextStyle(color: DojoColors.textHint, fontSize: 10),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildJournalEmptyState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(DojoDimens.paddingLarge),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.menu_book_outlined,
+              size: 56,
+              color: DojoColors.textHint.withOpacity(0.4),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'No journal entries yet',
+              style: TextStyle(
+                color: DojoColors.textPrimary,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Start with mood, people you met, and places you went.',
+              style: TextStyle(
+                color: DojoColors.textHint.withOpacity(0.8),
+                fontSize: 12,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatJournalDate(String dayKey) {
+    try {
+      final date = DateTime.parse(dayKey);
+      return '${date.year}/${date.month.toString().padLeft(2, '0')}/'
+          '${date.day.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return dayKey;
+    }
+  }
+
+  String _formatClockTime(DateTime dateTime) {
+    final local = dateTime.toLocal();
+    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final minute = local.minute.toString().padLeft(2, '0');
+    final amPm = local.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $amPm';
+  }
+
+  String _formatJournalType(JournalEntryType type) {
+    switch (type) {
+      case JournalEntryType.partial:
+        return 'entry';
+      case JournalEntryType.followUp:
+        return 'follow-up';
+      case JournalEntryType.recall:
+        return 'recall';
+      case JournalEntryType.dailySummary:
+        return 'daily summary';
+      case JournalEntryType.weeklySummary:
+        return 'weekly summary';
+    }
   }
 
   Widget _buildSuggestionBanner() {

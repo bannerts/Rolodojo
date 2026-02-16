@@ -1,5 +1,6 @@
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../models/attribute_model.dart';
+import '../models/journal_entry_model.dart';
 import '../models/record_model.dart';
 import '../models/rolo_model.dart';
 import '../models/sensei_response_model.dart';
@@ -379,5 +380,67 @@ class LocalDataSource {
       offset: offset,
     );
     return results.map((r) => SenseiResponseModel.fromMap(r)).toList();
+  }
+
+  // ============================================================
+  // JOURNAL OPERATIONS (tbl_journal - Journal Mode Ledger)
+  // ============================================================
+
+  /// Inserts a new journal row.
+  Future<void> insertJournalEntry(JournalEntryModel entry) async {
+    await _db.insert(
+      'tbl_journal',
+      entry.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.abort,
+    );
+  }
+
+  /// Retrieves journal rows for a specific day key (YYYY-MM-DD).
+  Future<List<JournalEntryModel>> getJournalEntriesByDate(
+    String journalDate, {
+    int limit = 200,
+    int offset = 0,
+  }) async {
+    final results = await _db.query(
+      'tbl_journal',
+      where: 'journal_date = ?',
+      whereArgs: [journalDate],
+      orderBy: 'created_at ASC',
+      limit: limit,
+      offset: offset,
+    );
+    return results.map((r) => JournalEntryModel.fromMap(r)).toList();
+  }
+
+  /// Retrieves journal rows in an inclusive date range.
+  Future<List<JournalEntryModel>> getJournalEntriesByDateRange(
+    String startDate,
+    String endDate, {
+    int limit = 1000,
+    int offset = 0,
+  }) async {
+    final results = await _db.query(
+      'tbl_journal',
+      where: 'journal_date >= ? AND journal_date <= ?',
+      whereArgs: [startDate, endDate],
+      orderBy: 'journal_date ASC, created_at ASC',
+      limit: limit,
+      offset: offset,
+    );
+    return results.map((r) => JournalEntryModel.fromMap(r)).toList();
+  }
+
+  /// Retrieves recent journal rows with pagination.
+  Future<List<JournalEntryModel>> getRecentJournalEntries({
+    int limit = 200,
+    int offset = 0,
+  }) async {
+    final results = await _db.query(
+      'tbl_journal',
+      orderBy: 'created_at DESC',
+      limit: limit,
+      offset: offset,
+    );
+    return results.map((r) => JournalEntryModel.fromMap(r)).toList();
   }
 }

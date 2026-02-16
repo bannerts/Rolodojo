@@ -5,11 +5,13 @@ import '../data/datasources/local_data_source.dart';
 import '../data/repositories/rolo_repository_impl.dart';
 import '../data/repositories/record_repository_impl.dart';
 import '../data/repositories/attribute_repository_impl.dart';
+import '../data/repositories/journal_repository_impl.dart';
 import '../data/repositories/sensei_repository_impl.dart';
 import '../data/repositories/user_repository_impl.dart';
 import '../domain/repositories/rolo_repository.dart';
 import '../domain/repositories/record_repository.dart';
 import '../domain/repositories/attribute_repository.dart';
+import '../domain/repositories/journal_repository.dart';
 import '../domain/repositories/sensei_repository.dart';
 import '../domain/repositories/user_repository.dart';
 import '../domain/entities/user_profile.dart';
@@ -35,6 +37,7 @@ class DojoProvider extends InheritedWidget {
   final RoloRepository roloRepository;
   final RecordRepository recordRepository;
   final AttributeRepository attributeRepository;
+  final JournalRepository journalRepository;
   final UserRepository userRepository;
   final SenseiRepository senseiRepository;
 
@@ -47,6 +50,7 @@ class DojoProvider extends InheritedWidget {
     required this.roloRepository,
     required this.recordRepository,
     required this.attributeRepository,
+    required this.journalRepository,
     required this.userRepository,
     required this.senseiRepository,
     required super.child,
@@ -76,6 +80,7 @@ class DojoProvider extends InheritedWidget {
     final roloRepo = RoloRepositoryImpl(dataSource);
     final recordRepo = RecordRepositoryImpl(dataSource);
     final attributeRepo = AttributeRepositoryImpl(dataSource);
+    final journalRepo = JournalRepositoryImpl(dataSource);
     final userRepo = UserRepositoryImpl(dataSource);
     final senseiRepo = SenseiRepositoryImpl(dataSource);
     final locationService = LocationService();
@@ -173,6 +178,7 @@ class DojoProvider extends InheritedWidget {
       attributeRepository: attributeRepo,
       senseiLlm: senseiLlm,
       senseiRepository: senseiRepo,
+      journalRepository: journalRepo,
       userRepository: userRepo,
       locationService: locationService,
     );
@@ -205,6 +211,7 @@ class DojoProvider extends InheritedWidget {
       roloRepository: roloRepo,
       recordRepository: recordRepo,
       attributeRepository: attributeRepo,
+      journalRepository: journalRepo,
       userRepository: userRepo,
       senseiRepository: senseiRepo,
       child: child,

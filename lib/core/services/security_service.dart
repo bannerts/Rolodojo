@@ -22,7 +22,7 @@ class SecurityService {
   }
 
   /// Helper to open the database with SQLCipher encryption.
-  Future<Database> openEncryptedDatabase(String path, {int version = 2}) async {
+  Future<Database> openEncryptedDatabase(String path, {int version = 3}) async {
     final password = await getMasterKey();
     
     return await openDatabase(
@@ -50,6 +50,7 @@ class SecurityService {
     await _createAttributeSchema(db);
     await _createUserSchema(db);
     await _createSenseiSchema(db);
+    await _createJournalSchema(db);
   }
 
   static Future<void> _applyMigrations(
@@ -62,6 +63,9 @@ class SecurityService {
     if (oldVersion < 2) {
       await _createUserSchema(db);
       await _createSenseiSchema(db);
+    }
+    if (oldVersion < 3) {
+      await _createJournalSchema(db);
     }
   }
 
@@ -169,6 +173,33 @@ class SecurityService {
     );
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_sensei_created_at ON tbl_sensei(created_at DESC)',
+    );
+  }
+
+  static Future<void> _createJournalSchema(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS tbl_journal (
+        journal_id TEXT PRIMARY KEY,
+        journal_date TEXT NOT NULL,
+        role TEXT NOT NULL,
+        entry_type TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source_rolo_id TEXT,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (source_rolo_id) REFERENCES tbl_rolos(rolo_id)
+          ON DELETE SET NULL
+      )
+    ''');
+
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_journal_date_created ON tbl_journal(journal_date, created_at)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_journal_created_at ON tbl_journal(created_at DESC)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_journal_type ON tbl_journal(entry_type)',
     );
   }
 }
