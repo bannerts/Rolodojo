@@ -305,10 +305,9 @@ class LocalLlmService implements SenseiLlmService {
         apiKey: grokApiKey.trim(),
       ),
       LlmProvider.gemini: _ProviderConfig(
-        baseUri: _normalizeRequiredSuffix(
+        baseUri: _normalizeGeminiBaseUri(
           geminiBaseUrl,
-          defaultBase: 'https://generativelanguage.googleapis.com/v1beta',
-          requiredSuffix: '/v1beta',
+          defaultBase: 'https://generativelanguage.googleapis.com/v1',
         ),
         configuredModel: _trimOrDefault(geminiModel, 'gemini-1.5-flash'),
         defaultConfiguredModel: _trimOrDefault(geminiModel, 'gemini-1.5-flash'),
@@ -339,6 +338,7 @@ class LocalLlmService implements SenseiLlmService {
       ValueNotifier(const LlmHealthStatus());
   late final Map<LlmProvider, _ProviderConfig> _providerConfigs;
   final Map<LlmProvider, String> _activeModels = <LlmProvider, String>{};
+  Uri? _activeGeminiBaseUri;
   LlmProvider _currentProvider;
   DateTime? _lastHealthCheck;
   LlmProvider? _lastHealthProvider;
@@ -428,6 +428,9 @@ class LocalLlmService implements SenseiLlmService {
 
     final sanitized = apiKey.trim();
     config.apiKey = sanitized;
+    if (provider == LlmProvider.gemini) {
+      _activeGeminiBaseUri = null;
+    }
 
     final storageKey = _apiKeyStorageKey(provider);
     if (sanitized.isEmpty) {
@@ -456,6 +459,9 @@ class LocalLlmService implements SenseiLlmService {
         : sanitized;
     config.configuredModel = nextModel;
     _activeModels.remove(provider);
+    if (provider == LlmProvider.gemini) {
+      _activeGeminiBaseUri = null;
+    }
 
     final storageKey = _modelStorageKey(provider);
     if (nextModel == config.defaultConfiguredModel) {
@@ -633,7 +639,40 @@ class LocalLlmService implements SenseiLlmService {
       return _missingApiKeyStatus(now, LlmProvider.gemini, config);
     }
 
-    final response = await _getJson(_geminiModelsEndpoint(config.baseUri, config.apiKey));
+    try {
+      final primary = await _resolveGeminiHealthAgainstBase(
+        now: now,
+        config: config,
+        baseUri: config.baseUri,
+      );
+      _activeGeminiBaseUri = config.baseUri;
+      return primary;
+    } catch (_) {
+      final fallbackBase = _geminiAlternativeBaseUri(config.baseUri);
+      if (fallbackBase == null) {
+        rethrow;
+      }
+
+      try {
+        final fallback = await _resolveGeminiHealthAgainstBase(
+          now: now,
+          config: config,
+          baseUri: fallbackBase,
+        );
+        _activeGeminiBaseUri = fallbackBase;
+        return fallback;
+      } catch (_) {
+        rethrow;
+      }
+    }
+  }
+
+  Future<LlmHealthStatus> _resolveGeminiHealthAgainstBase({
+    required DateTime now,
+    required _ProviderConfig config,
+    required Uri baseUri,
+  }) async {
+    final response = await _getJson(_geminiModelsEndpoint(baseUri, config.apiKey));
     final availableModels = _parseGeminiModelIds(response);
     final resolvedModel = _resolveModelName(
       configuredModel: config.configuredModel,
@@ -652,13 +691,13 @@ class LocalLlmService implements SenseiLlmService {
       serverReachable: true,
       modelAvailable: resolvedModel != null,
       apiKeyConfigured: true,
-      endpoint: config.baseUri.toString(),
+      endpoint: baseUri.toString(),
       configuredModel: config.configuredModel,
       activeModel: resolvedModel,
       availableModels: availableModels,
       message: _buildModelHealthMessage(
         provider: LlmProvider.gemini,
-        endpoint: config.baseUri.toString(),
+        endpoint: baseUri.toString(),
         configuredModel: config.configuredModel,
         resolvedModel: resolvedModel,
         availableModels: availableModels,
@@ -991,8 +1030,9 @@ class LocalLlmService implements SenseiLlmService {
     required int maxTokens,
     required double temperature,
   }) async {
+    final baseUri = _activeGeminiBaseUri ?? config.baseUri;
     final response = await _postJson(
-      _geminiGenerateEndpoint(config.baseUri, activeModelName, config.apiKey),
+      _geminiGenerateEndpoint(baseUri, activeModelName, config.apiKey),
       <String, dynamic>{
         'systemInstruction': {
           'parts': [
@@ -1272,6 +1312,24 @@ class LocalLlmService implements SenseiLlmService {
     );
   }
 
+  Uri? _geminiAlternativeBaseUri(Uri baseUri) {
+    var path = baseUri.path;
+    if (path.endsWith('/')) {
+      path = path.substring(0, path.length - 1);
+    }
+    if (path.endsWith('/v1beta')) {
+      return baseUri.replace(
+        path: '${path.substring(0, path.length - '/v1beta'.length)}/v1',
+      );
+    }
+    if (path.endsWith('/v1')) {
+      return baseUri.replace(
+        path: '${path.substring(0, path.length - '/v1'.length)}/v1beta',
+      );
+    }
+    return null;
+  }
+
   String _joinPath(String basePath, String suffix) {
     final normalizedBase = basePath.endsWith('/')
         ? basePath.substring(0, basePath.length - 1)
@@ -1290,6 +1348,27 @@ class LocalLlmService implements SenseiLlmService {
       defaultBase: defaultBase,
       requiredSuffix: '/v1',
     );
+  }
+
+  static Uri _normalizeGeminiBaseUri(
+    String rawBaseUrl, {
+    required String defaultBase,
+  }) {
+    final raw = rawBaseUrl.trim().isEmpty ? defaultBase : rawBaseUrl.trim();
+    final parsed = Uri.parse(raw);
+    var path = parsed.path;
+    if (path.isEmpty || path == '/') {
+      path = '/v1';
+    } else {
+      if (path.endsWith('/')) {
+        path = path.substring(0, path.length - 1);
+      }
+      final hasVersion = path.endsWith('/v1') || path.endsWith('/v1beta');
+      if (!hasVersion) {
+        path = '$path/v1';
+      }
+    }
+    return parsed.replace(path: path);
   }
 
   static Uri _normalizeRequiredSuffix(
