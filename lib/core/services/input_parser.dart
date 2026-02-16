@@ -51,11 +51,39 @@ class ParsedInput {
 /// - "Set [Name]'s [attribute] to [value]"
 /// - "Remember [Name]'s [attribute] is [value]"
 class InputParser {
+  static const String _relationshipKey = 'relationship_to_user';
+
   // Pattern matchers for different input formats
   static final List<_PatternMatcher> _patterns = [
+    // "My girlfriend's name is Bridget Suzanne Hale"
+    _PatternMatcher(
+      RegExp(
+        r"^(?:my\s+)?(girlfriend|boyfriend|wife|husband|partner|fiancee?|fiancé|fiancée)\s*(?:['’]s)?\s+name\s+is\s+(.+)$",
+        caseSensitive: false,
+      ),
+      (match) => (
+        subject: _cleanSubjectValue(match.group(2)!),
+        key: _relationshipKey,
+        value: _normalizeRelationshipTerm(match.group(1)!),
+      ),
+    ),
+
+    // "Bridget Suzanne Hale is my girlfriend"
+    _PatternMatcher(
+      RegExp(
+        r"^(.+?)\s+is\s+my\s+(girlfriend|boyfriend|wife|husband|partner|fiancee?|fiancé|fiancée)\s*[.!]?$",
+        caseSensitive: false,
+      ),
+      (match) => (
+        subject: _cleanSubjectValue(match.group(1)!),
+        key: _relationshipKey,
+        value: _normalizeRelationshipTerm(match.group(2)!),
+      ),
+    ),
+
     // "[Name]'s [attribute] is [value]"
     _PatternMatcher(
-      RegExp(r"^(.+?)'s\s+(.+?)\s+is\s+(.+)$", caseSensitive: false),
+      RegExp(r"^(.+?)['’]s\s+(.+?)\s+is\s+(.+)$", caseSensitive: false),
       (match) => (
         subject: match.group(1)!.trim(),
         key: match.group(2)!.trim(),
@@ -85,7 +113,7 @@ class InputParser {
 
     // "Set [Name]'s [attribute] to [value]"
     _PatternMatcher(
-      RegExp(r"^set\s+(.+?)'s\s+(.+?)\s+to\s+(.+)$", caseSensitive: false),
+      RegExp(r"^set\s+(.+?)['’]s\s+(.+?)\s+to\s+(.+)$", caseSensitive: false),
       (match) => (
         subject: match.group(1)!.trim(),
         key: match.group(2)!.trim(),
@@ -95,7 +123,7 @@ class InputParser {
 
     // "Remember [Name]'s [attribute] is [value]"
     _PatternMatcher(
-      RegExp(r"^remember\s+(.+?)'s\s+(.+?)\s+is\s+(.+)$", caseSensitive: false),
+      RegExp(r"^remember\s+(.+?)['’]s\s+(.+?)\s+is\s+(.+)$", caseSensitive: false),
       (match) => (
         subject: match.group(1)!.trim(),
         key: match.group(2)!.trim(),
@@ -134,6 +162,9 @@ class InputParser {
       final match = pattern.regex.firstMatch(trimmedInput);
       if (match != null) {
         final result = pattern.extractor(match);
+        if (result.key == _relationshipKey && !_looksLikePersonName(result.subject)) {
+          continue;
+        }
         final subjectUri = _inferUri(result.subject);
         final attributeKey = UriUtils.nameToIdentifier(result.key);
 
@@ -231,6 +262,43 @@ class InputParser {
     }
 
     return pairs;
+  }
+
+  static String _normalizeRelationshipTerm(String raw) {
+    final normalized = raw.toLowerCase().trim();
+    if (normalized == 'fiancé' || normalized == 'fiancée') {
+      return 'fiancee';
+    }
+    return normalized;
+  }
+
+  static String _cleanSubjectValue(String value) {
+    var normalized = value.trim();
+    normalized = normalized.replaceAll(RegExp("^[\"“”']+"), '');
+    normalized = normalized.replaceAll(RegExp("[\"“”']+\$"), '');
+    return normalized.trim();
+  }
+
+  static bool _looksLikePersonName(String raw) {
+    final cleaned = _cleanSubjectValue(raw);
+    if (cleaned.isEmpty || !RegExp(r'[A-Za-z]').hasMatch(cleaned)) {
+      return false;
+    }
+
+    final tokens = cleaned
+        .split(RegExp(r'\s+'))
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .toList(growable: false);
+    if (tokens.length >= 2) {
+      return true;
+    }
+
+    if (tokens.isEmpty) {
+      return false;
+    }
+    final token = tokens.first;
+    return token.length >= 2 && RegExp(r'[A-Z]').hasMatch(token);
   }
 }
 

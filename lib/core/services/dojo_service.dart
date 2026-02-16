@@ -125,6 +125,7 @@ class DojoService {
 
     // Parse the input — use active LLM provider if available, fall back to regex
     var parsed = _inputParser.parse(input);
+    var parsedFromLlm = false;
 
     if (!parsed.canCreateAttribute && _senseiLlm != null && _senseiLlm!.isReady) {
       // LLM may extract structure that regex missed
@@ -170,6 +171,7 @@ class DojoService {
           confidence: llmResult.confidence,
           originalText: input,
         );
+        parsedFromLlm = true;
       }
     }
 
@@ -201,45 +203,68 @@ class DojoService {
     String message;
 
     if (parsed.canCreateAttribute) {
+      final subjectUri = parsed.subjectUri!.toString();
+      final now = DateTime.now();
+
       // Check if record exists
-      final existingRecord = await _recordRepository.getByUri(
-        parsed.subjectUri!.toString(),
+      final existingRecord = await _recordRepository.getByUri(subjectUri);
+      final existingAttribute = await _attributeRepository.get(
+        subjectUri,
+        parsed.attributeKey!,
       );
+      final hasConflictingValue = existingAttribute?.value != null &&
+          !_valuesEquivalent(existingAttribute!.value!, parsed.attributeValue);
+      final shouldProtectExistingValue = parsedFromLlm &&
+          hasConflictingValue &&
+          !_isExplicitUpdateInput(input);
 
-      if (existingRecord == null) {
-        // Create new record
-        record = Record(
-          uri: parsed.subjectUri!.toString(),
-          displayName: parsed.subjectName!,
-          lastRoloId: roloId,
-          updatedAt: DateTime.now(),
-        );
-        await _recordRepository.upsert(record);
-        createdNewRecord = true;
+      if (shouldProtectExistingValue) {
+        record = existingRecord;
+        attribute = existingAttribute;
+        message = 'Existing ${_formatKey(parsed.attributeKey!)} for '
+            '${parsed.subjectName ?? subjectUri} is "${existingAttribute!.value}". '
+            'I did not overwrite it automatically. '
+            'Use an explicit update command or edit it in The Vault.';
       } else {
-        // Update existing record's last_rolo_id
-        record = existingRecord.copyWith(
+        if (existingRecord == null) {
+          // Create new record
+          record = Record(
+            uri: subjectUri,
+            displayName: parsed.subjectName!,
+            lastRoloId: roloId,
+            updatedAt: now,
+          );
+          await _recordRepository.upsert(record);
+          createdNewRecord = true;
+        } else {
+          // Update existing record's last_rolo_id
+          record = existingRecord.copyWith(
+            lastRoloId: roloId,
+            updatedAt: now,
+          );
+          await _recordRepository.upsert(record);
+        }
+
+        // Create/update the attribute
+        attribute = Attribute(
+          subjectUri: subjectUri,
+          key: parsed.attributeKey!,
+          value: parsed.attributeValue,
           lastRoloId: roloId,
-          updatedAt: DateTime.now(),
+          updatedAt: now,
         );
-        await _recordRepository.upsert(record);
+        await _attributeRepository.upsert(attribute);
+
+        message = createdNewRecord
+            ? 'Created ${parsed.subjectName} with ${_formatKey(parsed.attributeKey!)}: ${parsed.attributeValue}'
+            : 'Updated ${parsed.subjectName}\'s ${_formatKey(parsed.attributeKey!)} to ${parsed.attributeValue}';
       }
-
-      // Create/update the attribute
-      attribute = Attribute(
-        subjectUri: parsed.subjectUri!.toString(),
-        key: parsed.attributeKey!,
-        value: parsed.attributeValue,
-        lastRoloId: roloId,
-        updatedAt: DateTime.now(),
-      );
-      await _attributeRepository.upsert(attribute);
-
-      message = createdNewRecord
-          ? 'Created ${parsed.subjectName} with ${_formatKey(parsed.attributeKey!)}: ${parsed.attributeValue}'
-          : 'Updated ${parsed.subjectName}\'s ${_formatKey(parsed.attributeKey!)} to ${parsed.attributeValue}';
     } else if (parsed.isQuery) {
-      message = 'Query received. Searching the Vault...';
+      message = await _answerQueryFromVault(
+        query: input,
+        parsed: parsed,
+        primaryUser: primaryUser,
+      );
     } else {
       message = 'Input recorded. Unable to extract structured data.';
     }
@@ -285,6 +310,98 @@ class DojoService {
 
     // Soft-delete the attribute
     return _attributeRepository.softDelete(subjectUri, key, roloId);
+  }
+
+  /// Manually updates an attribute value with an explicit audit Rolo.
+  Future<Attribute> updateAttributeValue({
+    required String subjectUri,
+    required String key,
+    required String value,
+  }) async {
+    final trimmedValue = value.trim();
+    if (trimmedValue.isEmpty) {
+      throw ArgumentError('Attribute value cannot be empty.');
+    }
+
+    final existing = await _attributeRepository.get(subjectUri, key);
+    if (existing == null) {
+      throw StateError('Attribute "$key" does not exist for $subjectUri.');
+    }
+
+    final normalizedExisting = existing.value?.trim() ?? '';
+    if (_valuesEquivalent(normalizedExisting, trimmedValue)) {
+      return existing;
+    }
+
+    final editLocation = await _locationService.getCurrentCoordinates();
+    final now = DateTime.now();
+    final roloId = _uuid.v4();
+    final rolo = Rolo(
+      id: roloId,
+      type: RoloType.input,
+      summoningText:
+          'Manual edit: $key for $subjectUri from "${existing.value ?? '(empty)'}" '
+          'to "$trimmedValue"',
+      targetUri: subjectUri,
+      metadata: RoloMetadata(
+        trigger: 'Manual_Edit',
+        location: editLocation,
+      ),
+      timestamp: now.toUtc(),
+    );
+    await _roloRepository.create(rolo);
+
+    final updated = existing.copyWith(
+      value: trimmedValue,
+      lastRoloId: roloId,
+      updatedAt: now,
+    );
+    await _attributeRepository.upsert(updated);
+    return updated;
+  }
+
+  /// Manually renames a record display name with an audit Rolo.
+  Future<Record> updateRecordDisplayName({
+    required String uri,
+    required String displayName,
+  }) async {
+    final trimmedName = displayName.trim();
+    if (trimmedName.isEmpty) {
+      throw ArgumentError('Display name cannot be empty.');
+    }
+
+    final existing = await _recordRepository.getByUri(uri);
+    if (existing == null) {
+      throw StateError('Record not found for uri "$uri".');
+    }
+    if (_valuesEquivalent(existing.displayName, trimmedName)) {
+      return existing;
+    }
+
+    final editLocation = await _locationService.getCurrentCoordinates();
+    final now = DateTime.now();
+    final roloId = _uuid.v4();
+    final rolo = Rolo(
+      id: roloId,
+      type: RoloType.input,
+      summoningText:
+          'Manual edit: rename "$uri" from "${existing.displayName}" to "$trimmedName"',
+      targetUri: uri,
+      metadata: RoloMetadata(
+        trigger: 'Manual_Edit',
+        location: editLocation,
+      ),
+      timestamp: now.toUtc(),
+    );
+    await _roloRepository.create(rolo);
+
+    final updated = existing.copyWith(
+      displayName: trimmedName,
+      lastRoloId: roloId,
+      updatedAt: now,
+    );
+    await _recordRepository.upsert(updated);
+    return updated;
   }
 
   /// Retrieves all attributes for a URI with their audit information.
@@ -411,13 +528,29 @@ class DojoService {
     final responseType = _resolveJournalResponseType(trimmed);
     late final String responseText;
     if (responseType == JournalEntryType.dailySummary) {
-      responseText = await _buildDailySummaryBlock(now);
+      responseText = await _buildDailySummaryBlock(
+        now,
+        requestPrompt: trimmed,
+        primaryUser: primaryUser,
+      );
     } else if (responseType == JournalEntryType.weeklySummary) {
-      responseText = await _buildWeeklySummaryBlock(now);
+      responseText = await _buildWeeklySummaryBlock(
+        now,
+        requestPrompt: trimmed,
+        primaryUser: primaryUser,
+      );
     } else if (responseType == JournalEntryType.recall) {
-      responseText = _buildJournalRecallResponse(trimmed, sourceEntries);
+      responseText = await _buildJournalRecallResponse(
+        trimmed,
+        sourceEntries,
+        primaryUser: primaryUser,
+      );
     } else {
-      responseText = _buildJournalFollowUpResponse(sourceEntries);
+      responseText = await _buildJournalFollowUpResponse(
+        trimmed,
+        sourceEntries,
+        primaryUser: primaryUser,
+      );
     }
 
     final senseiEntry = JournalEntry(
@@ -494,7 +627,13 @@ class DojoService {
       return null;
     }
     final targetDay = day ?? DateTime.now();
-    final summaryText = await _buildDailySummaryBlock(targetDay);
+    final primaryUser = _userRepository != null
+        ? await _userRepository!.getPrimary()
+        : null;
+    final summaryText = await _buildDailySummaryBlock(
+      targetDay,
+      primaryUser: primaryUser,
+    );
     final entry = JournalEntry(
       id: _uuid.v4(),
       journalDate: _journalDayKey(targetDay),
@@ -518,7 +657,13 @@ class DojoService {
     }
     final anchor = anchorDay ?? DateTime.now();
     final weekStart = _startOfWeek(anchor);
-    final summaryText = await _buildWeeklySummaryBlock(anchor);
+    final primaryUser = _userRepository != null
+        ? await _userRepository!.getPrimary()
+        : null;
+    final summaryText = await _buildWeeklySummaryBlock(
+      anchor,
+      primaryUser: primaryUser,
+    );
     final entry = JournalEntry(
       id: _uuid.v4(),
       journalDate: _journalDayKey(weekStart),
@@ -557,6 +702,212 @@ class DojoService {
     return _recordRepository.searchByName(query);
   }
 
+  Future<String> _answerQueryFromVault({
+    required String query,
+    required ParsedInput parsed,
+    required UserProfile? primaryUser,
+  }) async {
+    final bundle = await _buildVaultContextBundle(
+      query: query,
+      parsed: parsed,
+    );
+
+    if (_senseiLlm != null) {
+      try {
+        final llmAnswer = await _senseiLlm!.answerWithVault(
+          question: query,
+          vaultContext: bundle.context,
+          userProfileSummary: _buildUserProfileSummary(primaryUser),
+        );
+        final normalized = llmAnswer.trim();
+        if (normalized.isNotEmpty) {
+          return '$normalized\n\n${_buildSourcesUsedSection(bundle.sourcesUsed)}';
+        }
+      } catch (e) {
+        debugPrint('[DojoService] Query answer via LLM failed: $e');
+      }
+    }
+
+    if (!bundle.hasFacts) {
+      return 'I searched your vault but could not find enough related facts '
+          'for that question yet.\n\n'
+          '${_buildSourcesUsedSection(bundle.sourcesUsed)}';
+    }
+
+    return 'I found related vault facts, but could not produce a complete '
+        'answer right now. Relevant entries:\n${bundle.factsPreview}\n\n'
+        '${_buildSourcesUsedSection(bundle.sourcesUsed)}';
+  }
+
+  Future<_VaultContextBundle> _buildVaultContextBundle({
+    required String query,
+    required ParsedInput parsed,
+  }) async {
+    final normalizedQuery = _normalizeQueryForVaultSearch(query);
+    final contextLines = <String>[];
+    final factLines = <String>[];
+    final sourceMap = <String, Set<String>>{};
+
+    void addSource(String uri, String key) {
+      sourceMap.putIfAbsent(uri, () => <String>{}).add(key);
+    }
+
+    final recordsByName = await _recordRepository.searchByName(normalizedQuery);
+    final attrsBySearch = await _attributeRepository.search(normalizedQuery);
+    final rolosBySearch = await _roloRepository.search(normalizedQuery);
+
+    Record? directRecord;
+    List<Attribute> directAttributes = const [];
+    List<Rolo> directRolos = const [];
+    if (parsed.subjectUri != null) {
+      final subjectUri = parsed.subjectUri!.toString();
+      directRecord = await _recordRepository.getByUri(subjectUri);
+      directAttributes = await _attributeRepository.getByUri(subjectUri);
+      directRolos = await _roloRepository.getByTargetUri(subjectUri);
+    }
+
+    if (directRecord != null) {
+      final line = '- Direct record: ${directRecord.displayName} '
+          '(${directRecord.uri})';
+      contextLines.add(line);
+      factLines.add(line);
+      addSource(directRecord.uri, 'display_name');
+    }
+
+    if (directAttributes.isNotEmpty) {
+      for (final attr in directAttributes.take(10)) {
+        final line = '- Fact: ${attr.subjectUri}.${attr.key} = '
+            '${_truncateForPrompt(attr.value ?? '(deleted)', 120)}';
+        contextLines.add(line);
+        factLines.add(line);
+        addSource(attr.subjectUri, attr.key);
+      }
+    }
+
+    if (recordsByName.isNotEmpty) {
+      for (final record in recordsByName.take(6)) {
+        final line = '- Record match: ${record.displayName} (${record.uri})';
+        contextLines.add(line);
+        addSource(record.uri, 'display_name');
+      }
+    }
+
+    if (attrsBySearch.isNotEmpty) {
+      final seen = <String>{};
+      for (final attr in attrsBySearch) {
+        final key = '${attr.subjectUri}::${attr.key}';
+        if (seen.contains(key)) continue;
+        seen.add(key);
+        final line = '- Vault fact: ${attr.subjectUri}.${attr.key} = '
+            '${_truncateForPrompt(attr.value ?? '(deleted)', 120)}';
+        contextLines.add(line);
+        factLines.add(line);
+        addSource(attr.subjectUri, attr.key);
+        if (seen.length >= 12) break;
+      }
+    }
+
+    if (directRolos.isNotEmpty || rolosBySearch.isNotEmpty) {
+      final candidateRolos = <Rolo>[
+        ...directRolos.take(4),
+        ...rolosBySearch.take(6),
+      ];
+      final seenRoloIds = <String>{};
+      var count = 0;
+      for (final rolo in candidateRolos) {
+        if (seenRoloIds.contains(rolo.id)) continue;
+        seenRoloIds.add(rolo.id);
+        final line = '- Ledger note: ${_truncateForPrompt(rolo.summoningText, 140)} '
+            '(${_formatRoloTime(rolo.timestamp)})';
+        contextLines.add(line);
+        if (++count >= 8) break;
+      }
+    }
+
+    if (contextLines.isEmpty) {
+      contextLines.add('- No matching vault facts were found.');
+    }
+
+    final sourcesUsed = _formatSourcesFromMap(sourceMap);
+    final preview = factLines.take(4).join('\n');
+    return _VaultContextBundle(
+      context: contextLines.join('\n'),
+      hasFacts: factLines.isNotEmpty,
+      factsPreview: preview,
+      sourcesUsed: sourcesUsed,
+    );
+  }
+
+  List<String> _formatSourcesFromMap(Map<String, Set<String>> sourceMap) {
+    if (sourceMap.isEmpty) {
+      return const [];
+    }
+
+    final uris = sourceMap.keys.toList(growable: false)..sort();
+    final lines = <String>[];
+    for (final uri in uris) {
+      final keys = sourceMap[uri]!.toList(growable: false)..sort();
+      lines.add('$uri -> ${keys.join(', ')}');
+    }
+    return lines;
+  }
+
+  String _buildSourcesUsedSection(List<String> sources) {
+    if (sources.isEmpty) {
+      return 'Sources used:\n- none';
+    }
+
+    final limited = sources.take(8).toList(growable: false);
+    final buffer = StringBuffer('Sources used:\n');
+    for (final line in limited) {
+      buffer.writeln('- $line');
+    }
+    final remaining = sources.length - limited.length;
+    if (remaining > 0) {
+      buffer.writeln('- ...and $remaining more');
+    }
+    return buffer.toString().trimRight();
+  }
+
+  String _truncateForPrompt(String text, int maxLength) {
+    if (text.length <= maxLength) {
+      return text;
+    }
+    return '${text.substring(0, maxLength - 3)}...';
+  }
+
+  String _normalizeQueryForVaultSearch(String query) {
+    final trimmed = query.trim().toLowerCase();
+    if (trimmed.isEmpty) {
+      return query;
+    }
+
+    var normalized = trimmed
+        .replaceAll(RegExp(r'^(what|who|where|when|why|how)\s+'), '')
+        .replaceAll(RegExp(r'^(is|are|was|were|do|does|did|can|could)\s+'), '')
+        .replaceAll(RegExp(r'^(tell me|show me|find|lookup|look up)\s+'), '')
+        .replaceAll(RegExp(r'\babout\b'), '')
+        .replaceAll(RegExp(r'[^a-z0-9\s._-]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (normalized.isEmpty) {
+      normalized = query
+          .replaceAll(RegExp(r'[^A-Za-z0-9\s._-]'), ' ')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+    }
+    return normalized.isEmpty ? query.trim() : normalized;
+  }
+
+  String _formatRoloTime(DateTime timestamp) {
+    final local = timestamp.toLocal();
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$month/$day $hour:$minute';
+  }
+
   JournalEntryType _resolveJournalResponseType(String input) {
     if (_isJournalWeeklySummaryRequest(input)) {
       return JournalEntryType.weeklySummary;
@@ -570,7 +921,25 @@ class DojoService {
     return JournalEntryType.followUp;
   }
 
-  String _buildJournalFollowUpResponse(List<JournalEntry> dayEntries) {
+  Future<String> _buildJournalFollowUpResponse(
+    String input,
+    List<JournalEntry> dayEntries, {
+    required UserProfile? primaryUser,
+  }) async {
+    final llmResponse = await _tryLlmJournalResponse(
+      prompt:
+          'New journal entry: "$input"\nRespond as Sensei with one useful '
+          'follow-up that improves day journaling quality.',
+      contextEntries: dayEntries,
+      primaryUser: primaryUser,
+      systemInstruction: _journalFollowUpSystemInstruction,
+      maxTokens: 240,
+      temperature: 0.25,
+    );
+    if (llmResponse != null) {
+      return llmResponse;
+    }
+
     final insights = _extractJournalInsights(dayEntries);
     final followUps = <String>[];
     if (!insights.hasMood) {
@@ -601,10 +970,23 @@ class DojoService {
         'you want future-you to remember?$highlightBlock';
   }
 
-  String _buildJournalRecallResponse(
+  Future<String> _buildJournalRecallResponse(
     String input,
-    List<JournalEntry> dayEntries,
-  ) {
+    List<JournalEntry> dayEntries, {
+    required UserProfile? primaryUser,
+  }) async {
+    final llmResponse = await _tryLlmJournalResponse(
+      prompt: 'User question about today\'s journal: "$input"',
+      contextEntries: dayEntries,
+      primaryUser: primaryUser,
+      systemInstruction: _journalRecallSystemInstruction,
+      maxTokens: 260,
+      temperature: 0.15,
+    );
+    if (llmResponse != null) {
+      return llmResponse;
+    }
+
     final lower = input.toLowerCase();
     final insights = _extractJournalInsights(dayEntries);
     if (!insights.hasAnyData) {
@@ -639,8 +1021,27 @@ class DojoService {
     return 'So far today, here is what you logged:\n$summaryLines';
   }
 
-  Future<String> _buildDailySummaryBlock(DateTime day) async {
+  Future<String> _buildDailySummaryBlock(
+    DateTime day, {
+    String? requestPrompt,
+    UserProfile? primaryUser,
+  }) async {
     final entries = await getJournalEntriesForDate(day, limit: 800);
+    final llmSummary = await _tryLlmJournalResponse(
+      prompt: requestPrompt?.trim().isNotEmpty == true
+          ? requestPrompt!.trim()
+          : 'Generate a clean end-of-day journal summary block.',
+      contextEntries: entries,
+      primaryUser: primaryUser,
+      systemInstruction:
+          '${_journalSummarySystemInstruction}\nSummary date: ${_journalDayKey(day)}',
+      maxTokens: 520,
+      temperature: 0.2,
+    );
+    if (llmSummary != null) {
+      return llmSummary;
+    }
+
     final insights = _extractJournalInsights(entries);
     final userCount = entries.where((e) => e.role == JournalRole.user).length;
     final senseiCount = entries.where((e) => e.role == JournalRole.sensei).length;
@@ -700,10 +1101,30 @@ class DojoService {
     return buffer.toString().trimRight();
   }
 
-  Future<String> _buildWeeklySummaryBlock(DateTime anchorDay) async {
+  Future<String> _buildWeeklySummaryBlock(
+    DateTime anchorDay, {
+    String? requestPrompt,
+    UserProfile? primaryUser,
+  }) async {
     final weekStart = _startOfWeek(anchorDay);
     final weekEnd = weekStart.add(const Duration(days: 6));
     final weekEntries = await getJournalEntriesForWeek(anchorDay, limit: 1600);
+
+    final llmSummary = await _tryLlmJournalResponse(
+      prompt: requestPrompt?.trim().isNotEmpty == true
+          ? requestPrompt!.trim()
+          : 'Generate a weekly journal summary across the provided entries.',
+      contextEntries: weekEntries,
+      primaryUser: primaryUser,
+      systemInstruction:
+          '${_journalWeeklySystemInstruction}\nWeek range: '
+          '${_journalDayKey(weekStart)} to ${_journalDayKey(weekEnd)}',
+      maxTokens: 620,
+      temperature: 0.2,
+    );
+    if (llmSummary != null) {
+      return llmSummary;
+    }
 
     final byDate = <String, List<JournalEntry>>{};
     for (final entry in weekEntries) {
@@ -770,6 +1191,103 @@ class DojoService {
 
     return buffer.toString().trimRight();
   }
+
+  Future<String?> _tryLlmJournalResponse({
+    required String prompt,
+    required List<JournalEntry> contextEntries,
+    required UserProfile? primaryUser,
+    required String systemInstruction,
+    int maxTokens = 280,
+    double temperature = 0.2,
+  }) async {
+    final llm = _senseiLlm;
+    if (llm == null) {
+      return null;
+    }
+
+    final entriesContext = _buildJournalContextBlock(contextEntries);
+    if (entriesContext.isEmpty) {
+      return null;
+    }
+    final userProfile = _buildUserProfileSummary(primaryUser);
+    final contextBlock = userProfile == null
+        ? entriesContext
+        : '- User profile: $userProfile\n$entriesContext';
+
+    try {
+      final response = await llm.answerWithContext(
+        prompt: prompt,
+        context: contextBlock,
+        systemInstruction: systemInstruction,
+        maxTokens: maxTokens,
+        temperature: temperature,
+      );
+      final normalized = response.trim();
+      return normalized.isEmpty ? null : normalized;
+    } catch (e) {
+      debugPrint('[DojoService] Journal LLM response failed: $e');
+      return null;
+    }
+  }
+
+  String _buildJournalContextBlock(List<JournalEntry> entries) {
+    if (entries.isEmpty) {
+      return '';
+    }
+
+    final normalizedEntries = [...entries]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final lines = <String>[];
+    var added = 0;
+    for (final entry in normalizedEntries) {
+      if (entry.entryType == JournalEntryType.weeklySummary ||
+          entry.entryType == JournalEntryType.dailySummary) {
+        continue;
+      }
+      final content = entry.content.trim();
+      if (content.isEmpty) {
+        continue;
+      }
+      final author = entry.role == JournalRole.user ? 'User' : 'Sensei';
+      lines.add(
+        '- ${entry.journalDate} ${_formatRoloTime(entry.createdAt)} '
+        '[$author/${entry.entryType.value}]: '
+        '${_truncateForPrompt(content, 220)}',
+      );
+      if (++added >= 40) {
+        break;
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  static const String _journalFollowUpSystemInstruction =
+      'You are Sensei in Journal Mode. Coach the user to capture high-value '
+      'day details. Prioritize missing: mood shifts, people interactions, '
+      'places visited, and key events. Keep response short and practical.';
+
+  static const String _journalRecallSystemInstruction =
+      'You are Sensei answering recall questions from journal context only. '
+      'Do not invent facts. If missing, explicitly say the journal does not '
+      'contain that detail yet.';
+
+  static const String _journalSummarySystemInstruction =
+      'Create a clean daily journal summary block. Include sections:\n'
+      '1) Mood through the day\n'
+      '2) People and interactions\n'
+      '3) Places visited\n'
+      '4) Key events/highlights\n'
+      '5) One reflection prompt for tomorrow.\n'
+      'Stay grounded strictly in provided context.';
+
+  static const String _journalWeeklySystemInstruction =
+      'Create a weekly journal summary from context only. Include:\n'
+      '1) Overall mood trends\n'
+      '2) Most frequent people interactions\n'
+      '3) Places/patterns across the week\n'
+      '4) Daily bullets where available\n'
+      '5) Recommended focus for next week.';
 
   _JournalInsights _extractJournalInsights(List<JournalEntry> entries) {
     final moods = <String>{};
@@ -1029,6 +1547,32 @@ class DojoService {
         .join(' ');
   }
 
+  bool _isExplicitUpdateInput(String input) {
+    final normalized = input.toLowerCase();
+    return normalized.contains(' set ') ||
+        normalized.startsWith('set ') ||
+        normalized.contains(' update ') ||
+        normalized.startsWith('update ') ||
+        normalized.contains(' change ') ||
+        normalized.startsWith('change ') ||
+        normalized.contains(' correct ') ||
+        normalized.startsWith('correct ') ||
+        normalized.contains(' replace ') ||
+        normalized.startsWith('replace ');
+  }
+
+  bool _valuesEquivalent(String? left, String? right) {
+    final normalizedLeft = (left ?? '')
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ');
+    final normalizedRight = (right ?? '')
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ');
+    return normalizedLeft == normalizedRight;
+  }
+
   Future<RoloMetadata> _enrichMetadataWithLocation(RoloMetadata metadata) async {
     final existingLocation = metadata.location?.trim();
     if (existingLocation != null && existingLocation.isNotEmpty) {
@@ -1111,4 +1655,18 @@ class _JournalInsights {
   bool get hasPlaces => places.isNotEmpty;
   bool get hasAnyData =>
       moods.isNotEmpty || people.isNotEmpty || places.isNotEmpty || highlights.isNotEmpty;
+}
+
+class _VaultContextBundle {
+  final String context;
+  final bool hasFacts;
+  final String factsPreview;
+  final List<String> sourcesUsed;
+
+  const _VaultContextBundle({
+    required this.context,
+    required this.hasFacts,
+    required this.factsPreview,
+    required this.sourcesUsed,
+  });
 }

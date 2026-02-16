@@ -41,6 +41,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _isCheckingLlm = false;
   bool _isSwitchingLlmProvider = false;
   bool _isSavingApiKey = false;
+  bool _isSavingModel = false;
   bool _isLoadingProfile = false;
   bool _isSavingProfile = false;
   bool _profileLoaded = false;
@@ -264,8 +265,20 @@ class _SettingsPageState extends State<SettingsPage> {
               subtitle: _senseiLlm == null
                   ? 'Not configured'
                   : 'active: ${_senseiLlm!.activeModelName} / configured: '
-                      '${_senseiLlm!.configuredModelName}',
-              trailing: null,
+                      '${_senseiLlm!.configuredModelFor(_selectedProvider)}',
+              trailing: _isSavingModel
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: DojoColors.senseiGold,
+                      ),
+                    )
+                  : const Icon(Icons.chevron_right, color: DojoColors.textHint),
+              onTap: _senseiLlm == null || _isSavingModel
+                  ? null
+                  : _showModelEditorDialog,
             ),
             const Divider(color: DojoColors.border, height: 1),
             _buildSettingsTile(
@@ -853,6 +866,168 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 ElevatedButton(
                   onPressed: isSubmitting ? null : () => submit(clear: false),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: DojoColors.senseiGold,
+                    foregroundColor: DojoColors.slate,
+                  ),
+                  child: isSubmitting
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    controller.dispose();
+  }
+
+  Future<void> _showModelEditorDialog() async {
+    final senseiLlm = _senseiLlm;
+    if (senseiLlm == null) {
+      return;
+    }
+
+    final currentConfigured = senseiLlm.configuredModelFor(_selectedProvider);
+    final controller = TextEditingController(text: currentConfigured);
+    await showDialog(
+      context: context,
+      builder: (dialogContext) {
+        var isSubmitting = false;
+        final suggestions = _llmHealthStatus.provider == _selectedProvider
+            ? _llmHealthStatus.availableModels
+            : const <String>[];
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> submit({required bool resetToDefault}) async {
+              final model = resetToDefault ? '' : controller.text.trim();
+              if (!resetToDefault && model.isEmpty) {
+                _showSnackBar('Enter a model name or tap Reset');
+                return;
+              }
+
+              setDialogState(() {
+                isSubmitting = true;
+              });
+              if (mounted) {
+                setState(() {
+                  _isSavingModel = true;
+                });
+              }
+
+              try {
+                await senseiLlm.setConfiguredModel(_selectedProvider, model);
+                await senseiLlm.checkHealth(force: true);
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop();
+                }
+                if (mounted) {
+                  _showSnackBar(
+                    resetToDefault
+                        ? 'Model reset for ${_selectedProvider.label}'
+                        : 'Model updated for ${_selectedProvider.label}',
+                  );
+                }
+              } catch (e) {
+                if (mounted) {
+                  _showSnackBar('Failed to update model: $e');
+                }
+                if (dialogContext.mounted) {
+                  setDialogState(() {
+                    isSubmitting = false;
+                  });
+                }
+              } finally {
+                if (mounted) {
+                  setState(() {
+                    _isSavingModel = false;
+                  });
+                }
+              }
+            }
+
+            return AlertDialog(
+              backgroundColor: DojoColors.graphite,
+              title: Row(
+                children: [
+                  const Icon(Icons.smart_toy_outlined, color: DojoColors.senseiGold),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${_selectedProvider.label} Model',
+                      style: const TextStyle(color: DojoColors.textPrimary),
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Choose a specific model id for this provider.',
+                    style: TextStyle(color: DojoColors.textHint, fontSize: 12),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    enabled: !isSubmitting,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    style: const TextStyle(color: DojoColors.textPrimary),
+                    decoration: const InputDecoration(
+                      labelText: 'Model ID',
+                      hintText: 'e.g. gpt-4.1, claude-3-7-sonnet',
+                    ),
+                  ),
+                  if (suggestions.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Available models detected:',
+                      style: TextStyle(color: DojoColors.textHint, fontSize: 12),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: suggestions
+                          .take(8)
+                          .map(
+                            (model) => ActionChip(
+                              label: Text(model),
+                              onPressed: isSubmitting
+                                  ? null
+                                  : () {
+                                      setDialogState(() {
+                                        controller.text = model;
+                                      });
+                                    },
+                            ),
+                          )
+                          .toList(growable: false),
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isSubmitting
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: isSubmitting ? null : () => submit(resetToDefault: true),
+                  child: const Text('Reset'),
+                ),
+                ElevatedButton(
+                  onPressed: isSubmitting ? null : () => submit(resetToDefault: false),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: DojoColors.senseiGold,
                     foregroundColor: DojoColors.slate,

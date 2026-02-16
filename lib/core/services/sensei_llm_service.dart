@@ -182,6 +182,7 @@ abstract class SenseiLlmService {
   bool get isReady;
   String get baseUrl;
   String get configuredModelName;
+  String configuredModelFor(LlmProvider provider);
   String get activeModelName;
   LlmProvider get currentProvider;
   List<LlmProvider> get supportedProviders;
@@ -196,6 +197,7 @@ abstract class SenseiLlmService {
 
   Future<void> selectProvider(LlmProvider provider);
   Future<void> setApiKey(LlmProvider provider, String apiKey);
+  Future<void> setConfiguredModel(LlmProvider provider, String modelName);
   Future<LlmHealthStatus> checkHealth({bool force = false});
 
   Future<LlmExtraction> parseInput(
@@ -207,6 +209,24 @@ abstract class SenseiLlmService {
     required String subjectUri,
     required Map<String, String> facts,
     List<String> recentRolos = const [],
+  });
+
+  /// Answers a user question using supplied vault context.
+  ///
+  /// The model must stay grounded in [vaultContext] and avoid fabricating data.
+  Future<String> answerWithVault({
+    required String question,
+    required String vaultContext,
+    String? userProfileSummary,
+  });
+
+  /// Answers a prompt grounded in an arbitrary context block.
+  Future<String> answerWithContext({
+    required String prompt,
+    required String context,
+    String? systemInstruction,
+    int maxTokens = 280,
+    double temperature = 0.2,
   });
 
   Future<String> summarize(String text, {int maxLength = 50});
@@ -226,6 +246,7 @@ abstract class SenseiLlmService {
 class LocalLlmService implements SenseiLlmService {
   static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
   static const String _apiKeyStoragePrefix = 'sensei_provider_api_key_';
+  static const String _modelStoragePrefix = 'sensei_provider_model_';
 
   LocalLlmService({
     LlmProvider initialProvider = LlmProvider.localLlama,
@@ -254,6 +275,7 @@ class LocalLlmService implements SenseiLlmService {
       LlmProvider.localLlama: _ProviderConfig(
         baseUri: _normalizeOpenAiBaseUri(localBaseUrl, defaultBase: 'http://localhost:11434/v1'),
         configuredModel: _trimOrDefault(localModel, 'llama3.3'),
+        defaultConfiguredModel: _trimOrDefault(localModel, 'llama3.3'),
         apiKey: '',
         fallbackModels: localFallbackModels
             .map((m) => m.trim())
@@ -267,6 +289,10 @@ class LocalLlmService implements SenseiLlmService {
           requiredSuffix: '/v1',
         ),
         configuredModel: _trimOrDefault(claudeModel, 'claude-3-5-sonnet-latest'),
+        defaultConfiguredModel: _trimOrDefault(
+          claudeModel,
+          'claude-3-5-sonnet-latest',
+        ),
         apiKey: claudeApiKey.trim(),
       ),
       LlmProvider.grok: _ProviderConfig(
@@ -275,15 +301,16 @@ class LocalLlmService implements SenseiLlmService {
           defaultBase: 'https://api.x.ai/v1',
         ),
         configuredModel: _trimOrDefault(grokModel, 'grok-2-latest'),
+        defaultConfiguredModel: _trimOrDefault(grokModel, 'grok-2-latest'),
         apiKey: grokApiKey.trim(),
       ),
       LlmProvider.gemini: _ProviderConfig(
-        baseUri: _normalizeRequiredSuffix(
+        baseUri: _normalizeGeminiBaseUri(
           geminiBaseUrl,
-          defaultBase: 'https://generativelanguage.googleapis.com/v1beta',
-          requiredSuffix: '/v1beta',
+          defaultBase: 'https://generativelanguage.googleapis.com/v1',
         ),
         configuredModel: _trimOrDefault(geminiModel, 'gemini-1.5-flash'),
+        defaultConfiguredModel: _trimOrDefault(geminiModel, 'gemini-1.5-flash'),
         apiKey: geminiApiKey.trim(),
       ),
       LlmProvider.chatGpt: _ProviderConfig(
@@ -292,6 +319,7 @@ class LocalLlmService implements SenseiLlmService {
           defaultBase: 'https://api.openai.com/v1',
         ),
         configuredModel: _trimOrDefault(chatGptModel, 'gpt-4o-mini'),
+        defaultConfiguredModel: _trimOrDefault(chatGptModel, 'gpt-4o-mini'),
         apiKey: chatGptApiKey.trim(),
       ),
     };
@@ -310,6 +338,7 @@ class LocalLlmService implements SenseiLlmService {
       ValueNotifier(const LlmHealthStatus());
   late final Map<LlmProvider, _ProviderConfig> _providerConfigs;
   final Map<LlmProvider, String> _activeModels = <LlmProvider, String>{};
+  Uri? _activeGeminiBaseUri;
   LlmProvider _currentProvider;
   DateTime? _lastHealthCheck;
   LlmProvider? _lastHealthProvider;
@@ -325,6 +354,15 @@ class LocalLlmService implements SenseiLlmService {
 
   @override
   String get configuredModelName => _activeConfig.configuredModel;
+
+  @override
+  String configuredModelFor(LlmProvider provider) {
+    final config = _providerConfigs[provider];
+    if (config == null) {
+      return '';
+    }
+    return config.configuredModel;
+  }
 
   @override
   String get activeModelName =>
@@ -355,6 +393,7 @@ class LocalLlmService implements SenseiLlmService {
     int threads = 4,
   }) async {
     await _hydrateApiKeysFromStorage();
+    await _hydrateModelsFromStorage();
     debugPrint(
       '[Sensei LLM] Initializing provider=${_currentProvider.label} '
       'endpoint=$baseUrl configuredModel=$configuredModelName marker=$modelPath',
@@ -389,12 +428,46 @@ class LocalLlmService implements SenseiLlmService {
 
     final sanitized = apiKey.trim();
     config.apiKey = sanitized;
+    if (provider == LlmProvider.gemini) {
+      _activeGeminiBaseUri = null;
+    }
 
     final storageKey = _apiKeyStorageKey(provider);
     if (sanitized.isEmpty) {
       await _secureStorage.delete(key: storageKey);
     } else {
       await _secureStorage.write(key: storageKey, value: sanitized);
+    }
+
+    _lastHealthCheck = null;
+    _lastHealthProvider = null;
+    if (_currentProvider == provider) {
+      await checkHealth(force: true);
+    }
+  }
+
+  @override
+  Future<void> setConfiguredModel(LlmProvider provider, String modelName) async {
+    final config = _providerConfigs[provider];
+    if (config == null) {
+      return;
+    }
+
+    final sanitized = modelName.trim();
+    final nextModel = sanitized.isEmpty
+        ? config.defaultConfiguredModel
+        : sanitized;
+    config.configuredModel = nextModel;
+    _activeModels.remove(provider);
+    if (provider == LlmProvider.gemini) {
+      _activeGeminiBaseUri = null;
+    }
+
+    final storageKey = _modelStorageKey(provider);
+    if (nextModel == config.defaultConfiguredModel) {
+      await _secureStorage.delete(key: storageKey);
+    } else {
+      await _secureStorage.write(key: storageKey, value: nextModel);
     }
 
     _lastHealthCheck = null;
@@ -566,7 +639,40 @@ class LocalLlmService implements SenseiLlmService {
       return _missingApiKeyStatus(now, LlmProvider.gemini, config);
     }
 
-    final response = await _getJson(_geminiModelsEndpoint(config.baseUri, config.apiKey));
+    try {
+      final primary = await _resolveGeminiHealthAgainstBase(
+        now: now,
+        config: config,
+        baseUri: config.baseUri,
+      );
+      _activeGeminiBaseUri = config.baseUri;
+      return primary;
+    } catch (_) {
+      final fallbackBase = _geminiAlternativeBaseUri(config.baseUri);
+      if (fallbackBase == null) {
+        rethrow;
+      }
+
+      try {
+        final fallback = await _resolveGeminiHealthAgainstBase(
+          now: now,
+          config: config,
+          baseUri: fallbackBase,
+        );
+        _activeGeminiBaseUri = fallbackBase;
+        return fallback;
+      } catch (_) {
+        rethrow;
+      }
+    }
+  }
+
+  Future<LlmHealthStatus> _resolveGeminiHealthAgainstBase({
+    required DateTime now,
+    required _ProviderConfig config,
+    required Uri baseUri,
+  }) async {
+    final response = await _getJson(_geminiModelsEndpoint(baseUri, config.apiKey));
     final availableModels = _parseGeminiModelIds(response);
     final resolvedModel = _resolveModelName(
       configuredModel: config.configuredModel,
@@ -585,13 +691,13 @@ class LocalLlmService implements SenseiLlmService {
       serverReachable: true,
       modelAvailable: resolvedModel != null,
       apiKeyConfigured: true,
-      endpoint: config.baseUri.toString(),
+      endpoint: baseUri.toString(),
       configuredModel: config.configuredModel,
       activeModel: resolvedModel,
       availableModels: availableModels,
       message: _buildModelHealthMessage(
         provider: LlmProvider.gemini,
-        endpoint: config.baseUri.toString(),
+        endpoint: baseUri.toString(),
         configuredModel: config.configuredModel,
         resolvedModel: resolvedModel,
         availableModels: availableModels,
@@ -702,6 +808,85 @@ class LocalLlmService implements SenseiLlmService {
         confidence: 0.65,
         inferenceTimeMs: stopwatch.elapsedMilliseconds,
       );
+    }
+  }
+
+  @override
+  Future<String> answerWithVault({
+    required String question,
+    required String vaultContext,
+    String? userProfileSummary,
+  }) async {
+    final trimmedQuestion = question.trim();
+    if (trimmedQuestion.isEmpty) {
+      return 'Please ask a question.';
+    }
+
+    final context = vaultContext.trim();
+    final health = await checkHealth();
+    if (!health.isHealthy) {
+      return _ruleBasedVaultAnswer(trimmedQuestion, context);
+    }
+
+    try {
+      final answer = await _createCompletion(
+        systemPrompt: '$_senseiCorePrompt\n$_qaSystemPrompt',
+        userPrompt: _buildVaultQaPrompt(
+          question: trimmedQuestion,
+          vaultContext: context,
+          userProfileSummary: userProfileSummary,
+        ),
+        maxTokens: 280,
+        temperature: 0.2,
+      );
+      final normalized = answer.trim();
+      if (normalized.isEmpty) {
+        return _ruleBasedVaultAnswer(trimmedQuestion, context);
+      }
+      return normalized;
+    } catch (e) {
+      await _onRequestFailure(e);
+      return _ruleBasedVaultAnswer(trimmedQuestion, context);
+    }
+  }
+
+  @override
+  Future<String> answerWithContext({
+    required String prompt,
+    required String context,
+    String? systemInstruction,
+    int maxTokens = 280,
+    double temperature = 0.2,
+  }) async {
+    final trimmedPrompt = prompt.trim();
+    if (trimmedPrompt.isEmpty) {
+      return '';
+    }
+
+    final health = await checkHealth();
+    if (!health.isHealthy) {
+      return '';
+    }
+
+    final contextBlock = context.trim().isEmpty
+        ? '- No context provided.'
+        : context.trim();
+    final instruction = (systemInstruction ?? '').trim();
+    final system = instruction.isEmpty
+        ? '$_senseiCorePrompt\n$_contextAnswerSystemPrompt'
+        : '$_senseiCorePrompt\n$instruction';
+
+    try {
+      final result = await _createCompletion(
+        systemPrompt: system,
+        userPrompt: 'Context:\n$contextBlock\n\nPrompt: "$trimmedPrompt"',
+        maxTokens: maxTokens,
+        temperature: temperature,
+      );
+      return result.trim();
+    } catch (e) {
+      await _onRequestFailure(e);
+      return '';
     }
   }
 
@@ -845,8 +1030,9 @@ class LocalLlmService implements SenseiLlmService {
     required int maxTokens,
     required double temperature,
   }) async {
+    final baseUri = _activeGeminiBaseUri ?? config.baseUri;
     final response = await _postJson(
-      _geminiGenerateEndpoint(config.baseUri, activeModelName, config.apiKey),
+      _geminiGenerateEndpoint(baseUri, activeModelName, config.apiKey),
       <String, dynamic>{
         'systemInstruction': {
           'parts': [
@@ -1126,6 +1312,24 @@ class LocalLlmService implements SenseiLlmService {
     );
   }
 
+  Uri? _geminiAlternativeBaseUri(Uri baseUri) {
+    var path = baseUri.path;
+    if (path.endsWith('/')) {
+      path = path.substring(0, path.length - 1);
+    }
+    if (path.endsWith('/v1beta')) {
+      return baseUri.replace(
+        path: '${path.substring(0, path.length - '/v1beta'.length)}/v1',
+      );
+    }
+    if (path.endsWith('/v1')) {
+      return baseUri.replace(
+        path: '${path.substring(0, path.length - '/v1'.length)}/v1beta',
+      );
+    }
+    return null;
+  }
+
   String _joinPath(String basePath, String suffix) {
     final normalizedBase = basePath.endsWith('/')
         ? basePath.substring(0, basePath.length - 1)
@@ -1144,6 +1348,27 @@ class LocalLlmService implements SenseiLlmService {
       defaultBase: defaultBase,
       requiredSuffix: '/v1',
     );
+  }
+
+  static Uri _normalizeGeminiBaseUri(
+    String rawBaseUrl, {
+    required String defaultBase,
+  }) {
+    final raw = rawBaseUrl.trim().isEmpty ? defaultBase : rawBaseUrl.trim();
+    final parsed = Uri.parse(raw);
+    var path = parsed.path;
+    if (path.isEmpty || path == '/') {
+      path = '/v1';
+    } else {
+      if (path.endsWith('/')) {
+        path = path.substring(0, path.length - 1);
+      }
+      final hasVersion = path.endsWith('/v1') || path.endsWith('/v1beta');
+      if (!hasVersion) {
+        path = '$path/v1';
+      }
+    }
+    return parsed.replace(path: path);
   }
 
   static Uri _normalizeRequiredSuffix(
@@ -1205,8 +1430,35 @@ class LocalLlmService implements SenseiLlmService {
     }
   }
 
+  Future<void> _hydrateModelsFromStorage() async {
+    for (final provider in LlmProvider.values) {
+      final config = _providerConfigs[provider];
+      if (config == null) {
+        continue;
+      }
+
+      try {
+        final storedModel = await _secureStorage.read(
+          key: _modelStorageKey(provider),
+        );
+        final sanitized = storedModel?.trim() ?? '';
+        if (sanitized.isNotEmpty) {
+          config.configuredModel = sanitized;
+        }
+      } catch (e) {
+        debugPrint(
+          '[Sensei LLM] Failed to read stored model for ${provider.label}: $e',
+        );
+      }
+    }
+  }
+
   String _apiKeyStorageKey(LlmProvider provider) {
     return '$_apiKeyStoragePrefix${provider.id}';
+  }
+
+  String _modelStorageKey(LlmProvider provider) {
+    return '$_modelStoragePrefix${provider.id}';
   }
 
   String _buildExtractionPrompt(String input, LlmParsingContext context) {
@@ -1273,6 +1525,17 @@ If extraction is uncertain, lower confidence and keep fields null.''';
 
   static const _synthesisSystemPrompt =
       'Generate one concise, factual insight from provided ledger facts.';
+
+  static const _qaSystemPrompt = '''You are Sensei answering vault-grounded questions.
+Rules:
+- Treat the vault context as your only source of truth.
+- Do not invent facts not present in the context.
+- If information is missing, explicitly say it is not found in the vault.
+- Keep answers direct and practical.''';
+
+  static const _contextAnswerSystemPrompt =
+      'Answer the prompt grounded in the provided context only. '
+      'If context is insufficient, say so clearly.';
 
   static const _summarySystemPrompt =
       'Summarize briefly without adding unverified details.';
@@ -1402,12 +1665,57 @@ If extraction is uncertain, lower confidence and keep fields null.''';
         'Return one concise insight sentence only.';
   }
 
+  String _buildVaultQaPrompt({
+    required String question,
+    required String vaultContext,
+    String? userProfileSummary,
+  }) {
+    final profile = userProfileSummary?.trim();
+    final profileLine = (profile == null || profile.isEmpty)
+        ? 'User profile: unavailable'
+        : 'User profile: $profile';
+    final contextBlock = vaultContext.isEmpty
+        ? 'Vault context:\n- No matching vault facts were found.'
+        : 'Vault context:\n$vaultContext';
+
+    return '$profileLine\n\n'
+        '$contextBlock\n\n'
+        'Question: "$question"\n\n'
+        'Instructions:\n'
+        '- Answer using vault context only.\n'
+        '- If the answer is missing, explicitly say it is not in the vault.\n'
+        '- Cite key facts from the vault context in plain text.\n'
+        '- Be concise and useful.';
+  }
+
   String _ruleBasedSummary(String text, int maxLength) {
     final firstSentence = text.split(RegExp(r'[.!?]')).first.trim();
     if (firstSentence.length <= maxLength) {
       return firstSentence;
     }
     return '${firstSentence.substring(0, maxLength - 3)}...';
+  }
+
+  String _ruleBasedVaultAnswer(String question, String vaultContext) {
+    if (vaultContext.isEmpty ||
+        vaultContext.toLowerCase().contains('no matching vault facts')) {
+      return 'I could not find that in the vault yet. '
+          'Try adding the fact first, then ask again.';
+    }
+
+    final lines = vaultContext
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty && line.startsWith('-'))
+        .take(4)
+        .toList(growable: false);
+    if (lines.isEmpty) {
+      return 'I found related vault entries, but not enough structure to answer '
+          'that confidently. Please ask with a specific name or attribute.';
+    }
+
+    final facts = lines.join('\n');
+    return 'Here is what I found in your vault relevant to "$question":\n$facts';
   }
 
   LlmExtraction _pickBestExtraction(
@@ -1479,13 +1787,15 @@ If extraction is uncertain, lower confidence and keep fields null.''';
 
 class _ProviderConfig {
   final Uri baseUri;
-  final String configuredModel;
+  String configuredModel;
+  final String defaultConfiguredModel;
   String apiKey;
   final List<String> fallbackModels;
 
   _ProviderConfig({
     required this.baseUri,
     required this.configuredModel,
+    required this.defaultConfiguredModel,
     required this.apiKey,
     this.fallbackModels = const [],
   });
