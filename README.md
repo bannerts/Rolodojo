@@ -28,6 +28,12 @@ This repository is optimized for AI-first development using **Claude Code** or *
 
 ---
 
+## 🧭 Local-First Architecture
+- [`local_inference.md`](./local_inference.md): Local orchestrator rules for using the local Llama endpoint (`localhost`) with quantized fallback guidance.
+- [`ledger_structure.md`](./ledger_structure.md): URI ledger format and local write contract, including explicit local-only privacy boundaries.
+
+---
+
 ## 🗺️ Phase 1 Checklist (The Foundation)
 | Task | Status | Tool |
 | :--- | :---: | :--- |
