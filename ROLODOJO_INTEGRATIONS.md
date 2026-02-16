@@ -1,21 +1,27 @@
-# 🔌 ROLODOJO_INTEGRATIONS: System & Service Hooks
+# 🔌 ROLODOJO Integrations
 
-## 1. Google Ecosystem (Gmail & Calendar)
-- **Service:** Gmail API via OAuth2 (Local authentication).
-- **Trigger:** Poll for messages with the "Dojo" label or specific keywords.
-- **Action:** Convert email body into an "Input Rolo." Store `message_id` in Rolo metadata to prevent duplicates.
-- **Calendar:** Create/Read events specifically for the `dojo.sys.schedule` URI.
+This document tracks external integrations.
 
-## 2. Telephony (Calls & SMS)
-- **Call Log:** Monitor incoming numbers via system permissions.
-- **Spam Defense:** Cross-reference `caller_id` with `dojo.con.*` URIs. If no match is found, query the Attribute Vault for secondary matches.
-- **SMS:** Parse specific structured texts (e.g., "Gate code is 1234") directly into the Attribute Vault via an Input Rolo.
+## Current status
 
-## 3. System Alarms & Notifications
-- **Alarms:** The Sensei can set system alarms based on Rolo requests (e.g., "Remind me to check the gate at 8 PM").
-- **Local Notifications:** Used for "Sensei Synthesis" prompts—asking the user to confirm a fact extracted from a recent integration event.
+The app currently operates on local/manual inputs and does not yet ingest live Gmail, telephony, or alarm streams.
 
-## 4. Integration Logic
-- Every integrated event MUST generate a Rolo in `tbl_rolos`.
-- The `source_id` (e.g., Gmail Message ID or Call Log ID) must be stored in the Rolo metadata to ensure the "Librarian" can link back to the source.
+## Planned integrations
+
+1. **Google ecosystem**
+   - Gmail ingestion via OAuth and label-based polling
+   - Calendar event read/write for `dojo.sys.schedule`
+
+2. **Telephony**
+   - Call log and SMS ingestion (permission-gated)
+   - Caller matching against `dojo.con.*` and known attributes
+
+3. **System reminders**
+   - Alarm/reminder scheduling from user requests
+   - Local notifications for synthesis confirmations
+
+## Integration invariants
+
+- Every integration event must create a Rolo in `tbl_rolos`.
+- External source identifiers (for example message/call IDs) should be stored in Rolo metadata (`source_id`) for replay and deduplication.
 

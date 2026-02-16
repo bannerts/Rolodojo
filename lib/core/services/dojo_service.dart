@@ -120,9 +120,7 @@ class DojoService {
   }) async {
     // Every user summoning should capture the device coordinates when possible.
     final enrichedMetadata = await _enrichMetadataWithLocation(metadata);
-    final primaryUser = _userRepository != null
-        ? await _userRepository!.getPrimary()
-        : null;
+    final primaryUser = await _getPrimaryUserProfile();
 
     // Parse every input through Sensei (LLM-first with vault context).
     final parserFallback = _inputParser.parse(input);
@@ -298,25 +296,14 @@ class DojoService {
     String subjectUri,
     String key,
   ) async {
-    final deletionLocation = await _locationService.getCurrentCoordinates();
-
-    // Create a deletion Rolo
-    final roloId = _uuid.v4();
-    final rolo = Rolo(
-      id: roloId,
-      type: RoloType.input,
+    final auditRolo = await _createAuditRolo(
       summoningText: 'Delete $key from $subjectUri',
       targetUri: subjectUri,
-      metadata: RoloMetadata(
-        trigger: 'Manual_Delete',
-        location: deletionLocation,
-      ),
-      timestamp: DateTime.now().toUtc(),
+      trigger: 'Manual_Delete',
     );
-    await _roloRepository.create(rolo);
 
     // Soft-delete the attribute
-    return _attributeRepository.softDelete(subjectUri, key, roloId);
+    return _attributeRepository.softDelete(subjectUri, key, auditRolo.id);
   }
 
   /// Manually updates an attribute value with an explicit audit Rolo.
@@ -340,27 +327,17 @@ class DojoService {
       return existing;
     }
 
-    final editLocation = await _locationService.getCurrentCoordinates();
     final now = DateTime.now();
-    final roloId = _uuid.v4();
-    final rolo = Rolo(
-      id: roloId,
-      type: RoloType.input,
+    final auditRolo = await _createAuditRolo(
       summoningText:
           'Manual edit: $key for $subjectUri from "${existing.value ?? '(empty)'}" '
           'to "$trimmedValue"',
       targetUri: subjectUri,
-      metadata: RoloMetadata(
-        trigger: 'Manual_Edit',
-        location: editLocation,
-      ),
-      timestamp: now.toUtc(),
     );
-    await _roloRepository.create(rolo);
 
     final updated = existing.copyWith(
       value: trimmedValue,
-      lastRoloId: roloId,
+      lastRoloId: auditRolo.id,
       updatedAt: now,
     );
     await _attributeRepository.upsert(updated);
@@ -385,26 +362,16 @@ class DojoService {
       return existing;
     }
 
-    final editLocation = await _locationService.getCurrentCoordinates();
     final now = DateTime.now();
-    final roloId = _uuid.v4();
-    final rolo = Rolo(
-      id: roloId,
-      type: RoloType.input,
+    final auditRolo = await _createAuditRolo(
       summoningText:
           'Manual edit: rename "$uri" from "${existing.displayName}" to "$trimmedName"',
       targetUri: uri,
-      metadata: RoloMetadata(
-        trigger: 'Manual_Edit',
-        location: editLocation,
-      ),
-      timestamp: now.toUtc(),
     );
-    await _roloRepository.create(rolo);
 
     final updated = existing.copyWith(
       displayName: trimmedName,
-      lastRoloId: roloId,
+      lastRoloId: auditRolo.id,
       updatedAt: now,
     );
     await _recordRepository.upsert(updated);
@@ -489,9 +456,7 @@ class DojoService {
       throw ArgumentError('Journal input cannot be empty.');
     }
 
-    final primaryUser = _userRepository != null
-        ? await _userRepository!.getPrimary()
-        : null;
+    final primaryUser = await _getPrimaryUserProfile();
     final now = DateTime.now();
     final dayKey = _journalDayKey(now);
     final enrichedMetadata = await _enrichMetadataWithLocation(
@@ -637,9 +602,7 @@ class DojoService {
       return null;
     }
     final targetDay = day ?? DateTime.now();
-    final primaryUser = _userRepository != null
-        ? await _userRepository!.getPrimary()
-        : null;
+    final primaryUser = await _getPrimaryUserProfile();
     final summaryText = await _buildDailySummaryBlock(
       targetDay,
       primaryUser: primaryUser,
@@ -667,9 +630,7 @@ class DojoService {
     }
     final anchor = anchorDay ?? DateTime.now();
     final weekStart = _startOfWeek(anchor);
-    final primaryUser = _userRepository != null
-        ? await _userRepository!.getPrimary()
-        : null;
+    final primaryUser = await _getPrimaryUserProfile();
     final summaryText = await _buildWeeklySummaryBlock(
       anchor,
       primaryUser: primaryUser,
@@ -1793,6 +1754,34 @@ class DojoService {
       parts.add('locale: $locale');
     }
     return parts.join(', ');
+  }
+
+  Future<UserProfile?> _getPrimaryUserProfile() async {
+    if (_userRepository == null) {
+      return null;
+    }
+    return _userRepository!.getPrimary();
+  }
+
+  Future<Rolo> _createAuditRolo({
+    required String summoningText,
+    required String targetUri,
+    String trigger = 'Manual_Edit',
+  }) async {
+    final location = await _locationService.getCurrentCoordinates();
+    final rolo = Rolo(
+      id: _uuid.v4(),
+      type: RoloType.input,
+      summoningText: summoningText,
+      targetUri: targetUri,
+      metadata: RoloMetadata(
+        trigger: trigger,
+        location: location,
+      ),
+      timestamp: DateTime.now().toUtc(),
+    );
+    await _roloRepository.create(rolo);
+    return rolo;
   }
 }
 
