@@ -61,6 +61,9 @@ class GhostRolo {
   /// Length of original summoning text.
   final int originalTextLength;
 
+  /// Original metadata, preserved for audit context (GPS/source fields).
+  final RoloMetadata originalMetadata;
+
   const GhostRolo({
     required this.originalId,
     required this.type,
@@ -68,6 +71,7 @@ class GhostRolo {
     this.targetUri,
     required this.timestamp,
     required this.originalTextLength,
+    required this.originalMetadata,
   });
 
   /// Creates a Ghost Rolo from a regular Rolo.
@@ -79,6 +83,7 @@ class GhostRolo {
       targetUri: rolo.targetUri,
       timestamp: rolo.timestamp,
       originalTextLength: rolo.summoningText.length,
+      originalMetadata: rolo.metadata,
     );
   }
 
@@ -99,7 +104,11 @@ class GhostRolo {
       targetUri: targetUri,
       metadata: RoloMetadata(
         trigger: 'Ghost_Optimization',
-        confidenceScore: 1.0,
+        confidenceScore: originalMetadata.confidenceScore ?? 1.0,
+        location: originalMetadata.location,
+        weather: originalMetadata.weather,
+        sourceId: originalMetadata.sourceId,
+        sourceDevice: originalMetadata.sourceDevice,
       ),
       timestamp: timestamp,
     );
