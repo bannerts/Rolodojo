@@ -12,7 +12,9 @@ The Rolodojo is a privacy-first, local-encrypted "Digital Sensei" designed to ma
 
 ## 3. System Components
 - **The Sensei (Orchestrator):** `DojoService` — parses inputs via `InputParser` and optional local LLM (`SenseiLlmService`), creates Rolos, and updates the Vault.
-- **The Scribe (Database Layer):** Repository implementations (`RoloRepositoryImpl`, `RecordRepositoryImpl`, `AttributeRepositoryImpl`) backed by `LocalDataSource` writing to SQLCipher.
+- **The Scribe (Database Layer):** Repository implementations (`RoloRepositoryImpl`, `RecordRepositoryImpl`, `AttributeRepositoryImpl`, `UserRepositoryImpl`, `SenseiRepositoryImpl`) backed by `LocalDataSource` writing to SQLCipher.
+- **The Owner Profile:** `tbl_user` stores user identity/preferences separately from URI contact records.
+- **The Sensei Journal:** `tbl_sensei` stores assistant responses linked to source `rolo_id` events.
 - **The Librarian (Search/Retrieval):** `LibrarianService` — full-text search across URIs, attributes, and Rolo history.
 - **The Guard (Security):** `SecurityService` — SQLCipher master key management via Flutter Secure Storage, biometric gate via `BiometricService`.
 - **The Synthesizer:** `SynthesisService` — detects patterns in Rolo data and suggests new attributes with confidence scores.

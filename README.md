@@ -23,6 +23,8 @@ This repository is optimized for AI-first development using **Claude Code** or *
 ## 🏛️ Architectural Pillars
 * **The Ledger:** Immutable history of all inputs (`tbl_rolos`).
 * **The Vault:** URI-based attribute storage with soft-delete logic (`tbl_attributes`).
+* **Owner Profile:** Dedicated user profile storage (`tbl_user`).
+* **Sensei Journal:** Persisted Sensei responses linked to source inputs (`tbl_sensei`).
 * **Security:** SQLCipher (AES-256) + Biometric Secure Storage key management.
 * **Architecture:** Flutter Clean Architecture (Data, Domain, Presentation).
 

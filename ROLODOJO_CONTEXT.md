@@ -48,6 +48,30 @@ All data objects must be addressed using a dot-notation URI. This allows the Sen
 
 **Indexes:** `idx_attributes_key`
 
+### **D. tbl_user (The Owner Profile)**
+*Dedicated profile storage for the device owner (not a contact record).*
+- `user_id`: TEXT PRIMARY KEY (single-user default: `owner`)
+- `display_name`: TEXT NOT NULL
+- `preferred_name`: TEXT (optional)
+- `profile_json`: TEXT (JSON — timezone, locale, user preferences)
+- `created_at`: TEXT NOT NULL (ISO8601)
+- `updated_at`: TEXT NOT NULL (ISO8601)
+
+**Indexes:** `idx_user_updated_at`
+
+### **E. tbl_sensei (The Sensei Journal)**
+*Persistent log of Sensei responses for each input Rolo.*
+- `sensei_id`: TEXT PRIMARY KEY (UUID)
+- `input_rolo_id`: TEXT NOT NULL (FK to `tbl_rolos` — `ON DELETE CASCADE`)
+- `target_uri`: TEXT (resolved URI for the response context)
+- `response_text`: TEXT NOT NULL (what Sensei returned to the user)
+- `provider`: TEXT (llama/claude/grok/gemini/chatgpt)
+- `model`: TEXT (active model used)
+- `confidence_score`: REAL
+- `created_at`: TEXT NOT NULL (ISO8601)
+
+**Indexes:** `idx_sensei_input_rolo`, `idx_sensei_created_at` (DESC)
+
 ## 3. Audit & Deletion Logic
 - **Soft Deletes Only:** To "delete" an attribute, the Sensei sets `attr_value` to `NULL` and updates the `last_rolo_id` to the ID of the Rolo that requested the deletion. Implemented via `Attribute.softDelete(roloId)`.
 - **Traceability:** Every fact in the Vault must point to a Rolo. This allows the Sensei to answer "Why do you know this?" by replaying the source Rolo's `summoning_text`. The `FlipCard` UI provides this on tap.
@@ -58,6 +82,7 @@ All data objects must be addressed using a dot-notation URI. This allows the Sen
 The `DojoProvider` (an `InheritedWidget`) is initialized at app startup via `DojoProvider.initialize()`. It:
 1. Opens the encrypted SQLCipher database via `SecurityService`
 2. Creates `LocalDataSource` and all repository implementations
-3. Initializes the local LLM (`LocalLlmService`) with fallback to rule-based parsing
-4. Constructs all services (`DojoService`, `LibrarianService`, `BackupService`, `SynthesisService`)
-5. Exposes everything to the widget tree via `DojoProvider.of(context)`
+3. Initializes the local/online LLM bridge (`LocalLlmService`) with fallback to rule-based parsing
+4. Ensures a primary user profile exists in `tbl_user`
+5. Constructs all services (`DojoService`, `LibrarianService`, `BackupService`, `SynthesisService`)
+6. Exposes everything to the widget tree via `DojoProvider.of(context)`

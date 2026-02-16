@@ -34,6 +34,8 @@ Recommended mapping:
 - `tbl_rolos.id` -> immutable event primary key
 - `tbl_rolos.target_uri` -> subject URI (`dojo.con.*`, `dojo.ent.*`, etc.)
 - `tbl_attributes.last_rolo_id` -> mandatory audit link back to the source event
+- `tbl_sensei.input_rolo_id` -> Sensei response linkage to the input event
+- `tbl_user.user_id` -> owner profile row (`owner`) for user-level context
 
 Result:
 

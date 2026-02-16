@@ -121,12 +121,14 @@ enum LlmProvider {
 
 /// Context fed to parsing requests so Sensei stays anchored to Dojo rules.
 class LlmParsingContext {
+  final String? userProfileSummary;
   final String? parserSubjectUriHint;
   final List<String> recentSummonings;
   final List<String> recentTargetUris;
   final List<String> hintAttributes;
 
   const LlmParsingContext({
+    this.userProfileSummary,
     this.parserSubjectUriHint,
     this.recentSummonings = const [],
     this.recentTargetUris = const [],
@@ -134,6 +136,7 @@ class LlmParsingContext {
   });
 
   bool get hasAnyHints =>
+      (userProfileSummary?.trim().isNotEmpty ?? false) ||
       (parserSubjectUriHint?.trim().isNotEmpty ?? false) ||
       recentSummonings.isNotEmpty ||
       recentTargetUris.isNotEmpty ||
@@ -1150,6 +1153,10 @@ Input: "$input"''';
     }
 
     final lines = <String>['Context:'];
+    final userProfile = context.userProfileSummary?.trim();
+    if (userProfile != null && userProfile.isNotEmpty) {
+      lines.add('- user_profile: $userProfile');
+    }
     final uriHint = context.parserSubjectUriHint?.trim();
     if (uriHint != null && uriHint.isNotEmpty) {
       lines.add('- parser_subject_uri_hint: $uriHint');
