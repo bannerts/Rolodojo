@@ -59,3 +59,6 @@ This repository is optimized for AI-first development using **Claude Code** or *
 ## 🛡️ Security Note
 All database files (`.db`, `.sqlite`) and local environment secrets are excluded via `.gitignore`. This project follows a **Zero-Cloud Default** policy.
 
+## 📍 Location Metadata
+- Manual Sensei inputs capture GPS coordinates and store them in `Rolo.metadata.location` when device location services and permissions are available.
+

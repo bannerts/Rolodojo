@@ -11,6 +11,7 @@ import '../domain/repositories/attribute_repository.dart';
 import 'services/security_service.dart';
 import 'services/dojo_service.dart';
 import 'services/librarian_service.dart';
+import 'services/location_service.dart';
 import 'services/backup_service.dart';
 import 'services/sensei_llm_service.dart';
 import 'services/synthesis_service.dart';
@@ -66,6 +67,7 @@ class DojoProvider extends InheritedWidget {
     final roloRepo = RoloRepositoryImpl(dataSource);
     final recordRepo = RecordRepositoryImpl(dataSource);
     final attributeRepo = AttributeRepositoryImpl(dataSource);
+    final locationService = LocationService();
 
     // Initialize LLM providers (local-first with optional online providers).
     const llmProviderRaw = String.fromEnvironment(
@@ -146,6 +148,7 @@ class DojoProvider extends InheritedWidget {
       recordRepository: recordRepo,
       attributeRepository: attributeRepo,
       senseiLlm: senseiLlm,
+      locationService: locationService,
     );
 
     final librarianService = LibrarianService(
