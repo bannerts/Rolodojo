@@ -1,11 +1,16 @@
+import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 import '../../domain/entities/attribute.dart';
 import '../../domain/entities/dojo_uri.dart';
 import '../../domain/entities/record.dart';
 import '../../domain/entities/rolo.dart';
+import '../../domain/entities/sensei_response.dart';
+import '../../domain/entities/user_profile.dart';
 import '../../domain/repositories/attribute_repository.dart';
 import '../../domain/repositories/record_repository.dart';
 import '../../domain/repositories/rolo_repository.dart';
+import '../../domain/repositories/sensei_repository.dart';
+import '../../domain/repositories/user_repository.dart';
 import 'input_parser.dart';
 import 'location_service.dart';
 import 'sensei_llm_service.dart';
@@ -50,6 +55,8 @@ class DojoService {
   final AttributeRepository _attributeRepository;
   final InputParser _inputParser;
   final SenseiLlmService? _senseiLlm;
+  final SenseiRepository? _senseiRepository;
+  final UserRepository? _userRepository;
   final LocationService _locationService;
   final Uuid _uuid;
 
@@ -59,12 +66,16 @@ class DojoService {
     required AttributeRepository attributeRepository,
     InputParser? inputParser,
     SenseiLlmService? senseiLlm,
+    SenseiRepository? senseiRepository,
+    UserRepository? userRepository,
     LocationService? locationService,
   })  : _roloRepository = roloRepository,
         _recordRepository = recordRepository,
         _attributeRepository = attributeRepository,
         _inputParser = inputParser ?? InputParser(),
         _senseiLlm = senseiLlm,
+        _senseiRepository = senseiRepository,
+        _userRepository = userRepository,
         _locationService = locationService ?? LocationService(),
         _uuid = const Uuid();
 
@@ -81,6 +92,9 @@ class DojoService {
   }) async {
     // Every user summoning should capture the device coordinates when possible.
     final enrichedMetadata = await _enrichMetadataWithLocation(metadata);
+    final primaryUser = _userRepository != null
+        ? await _userRepository!.getPrimary()
+        : null;
 
     // Parse the input — use active LLM provider if available, fall back to regex
     var parsed = _inputParser.parse(input);
@@ -108,6 +122,7 @@ class DojoService {
       final llmResult = await _senseiLlm!.parseInput(
         input,
         context: LlmParsingContext(
+          userProfileSummary: _buildUserProfileSummary(primaryUser),
           parserSubjectUriHint: parsed.subjectUri?.toString(),
           recentSummonings: recentRolos
               .map((r) => r.summoningText)
@@ -202,6 +217,13 @@ class DojoService {
       message = 'Input recorded. Unable to extract structured data.';
     }
 
+    await _persistSenseiResponse(
+      inputRoloId: roloId,
+      targetUri: parsed.subjectUri?.toString(),
+      responseText: message,
+      confidenceScore: parsed.confidence,
+    );
+
     return SummoningResult(
       rolo: rolo,
       parsed: parsed,
@@ -251,6 +273,60 @@ class DojoService {
     return _attributeRepository.getHistory(uri, key);
   }
 
+  /// Retrieves the primary user profile from `tbl_user`.
+  Future<UserProfile?> getPrimaryUserProfile() async {
+    return _userRepository?.getPrimary();
+  }
+
+  /// Creates or updates the primary user profile in `tbl_user`.
+  Future<UserProfile> upsertPrimaryUserProfile({
+    required String displayName,
+    String? preferredName,
+    Map<String, dynamic> profile = const {},
+  }) async {
+    final now = DateTime.now().toUtc();
+    final existing = _userRepository != null
+        ? await _userRepository!.getPrimary()
+        : null;
+    final userProfile = (existing ??
+            UserProfile(
+              userId: UserProfile.primaryUserId,
+              displayName: displayName,
+              preferredName: preferredName,
+              profile: profile,
+              createdAt: now,
+              updatedAt: now,
+            ))
+        .copyWith(
+          displayName: displayName,
+          preferredName: preferredName,
+          profile: profile,
+          updatedAt: now,
+        );
+
+    if (_userRepository == null) {
+      return userProfile;
+    }
+
+    return _userRepository!.upsert(userProfile);
+  }
+
+  /// Retrieves recent Sensei responses from `tbl_sensei`.
+  Future<List<SenseiResponse>> getRecentSenseiResponses({int limit = 50}) async {
+    if (_senseiRepository == null) {
+      return const [];
+    }
+    return _senseiRepository!.getRecent(limit: limit);
+  }
+
+  /// Retrieves Sensei responses linked to a specific input rolo.
+  Future<List<SenseiResponse>> getSenseiResponsesForInput(String roloId) async {
+    if (_senseiRepository == null) {
+      return const [];
+    }
+    return _senseiRepository!.getByInputRoloId(roloId);
+  }
+
   /// Retrieves recent Rolos for the stream.
   Future<List<Rolo>> getRecentRolos({int limit = 50}) async {
     return _roloRepository.getRecent(limit: limit);
@@ -293,5 +369,51 @@ class DojoService {
       sourceDevice: metadata.sourceDevice,
       confidenceScore: metadata.confidenceScore,
     );
+  }
+
+  Future<void> _persistSenseiResponse({
+    required String inputRoloId,
+    required String? targetUri,
+    required String responseText,
+    required double confidenceScore,
+  }) async {
+    if (_senseiRepository == null) {
+      return;
+    }
+
+    final provider = _senseiLlm?.currentProvider.id;
+    final model = _senseiLlm?.activeModelName;
+
+    final response = SenseiResponse(
+      id: _uuid.v4(),
+      inputRoloId: inputRoloId,
+      targetUri: targetUri,
+      responseText: responseText,
+      provider: provider,
+      model: model,
+      confidenceScore: confidenceScore,
+      createdAt: DateTime.now().toUtc(),
+    );
+    try {
+      await _senseiRepository!.create(response);
+    } catch (e) {
+      debugPrint('[DojoService] Failed to persist Sensei response: $e');
+    }
+  }
+
+  String? _buildUserProfileSummary(UserProfile? profile) {
+    if (profile == null) return null;
+    final parts = <String>[
+      'name: ${profile.senseiNameHint}',
+    ];
+    final timezone = profile.profile['timezone']?.toString();
+    if (timezone != null && timezone.isNotEmpty) {
+      parts.add('timezone: $timezone');
+    }
+    final locale = profile.profile['locale']?.toString();
+    if (locale != null && locale.isNotEmpty) {
+      parts.add('locale: $locale');
+    }
+    return parts.join(', ');
   }
 }

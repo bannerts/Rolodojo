@@ -6,6 +6,8 @@
 - **Summoning:** The specific act of a user providing input (text, voice, or image) to create a new Rolo. Processed via `DojoService.processSummoning()`.
 - **The Master Scroll:** The `tbl_records` table. It serves as the central registry for every URI (People, Places, Things).
 - **The Vault:** The `tbl_attributes` table. This is where "soft data" (specific details like gate codes or coffee orders) lives.
+- **Owner Profile:** The `tbl_user` table. Stores device-owner identity and preferences outside contact records.
+- **Sensei Journal:** The `tbl_sensei` table. Stores Sensei responses linked to each input Rolo.
 - **Synthesis:** An AI-generated suggestion created when the `SynthesisService` detects patterns (repetition, co-occurrence) in existing Rolos. Presented as gold-bordered cards with Accept/Reject.
 - **Rockstone:** The architectural philosophy that the database schema must remain permanent and immutable to ensure long-term data integrity.
 - **The Scribe:** The Sensei's function of parsing and writing data to the ledger. Implemented via `InputParser` and repository layer.

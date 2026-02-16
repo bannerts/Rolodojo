@@ -13,6 +13,8 @@
 ## 3. Data Integrity & Auditing
 - **Immutable Ledger:** Records in `tbl_rolos` are never modified or deleted (except Ghost optimization which replaces only the summoning text); they serve as the permanent "black box" for the Dojo.
 - **Audit Requirement:** No change can occur in the Attribute Vault (`tbl_attributes`) without a corresponding `last_rolo_id` linking to the source event.
+- **Sensei Journal Linkage:** Responses stored in `tbl_sensei` must reference an existing `input_rolo_id`.
+- **Owner Profile Isolation:** User identity/preferences are stored in `tbl_user`, not mixed into contact records.
 - **Foreign Key Enforcement:** `PRAGMA foreign_keys = ON` is set at database initialization. FK constraints use `ON DELETE SET NULL` for audit links and `ON DELETE CASCADE` for attribute-to-record links.
 
 ## 4. Backup & Recovery

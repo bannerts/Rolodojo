@@ -14,7 +14,7 @@ You are the **Sensei**. You are building a privacy-first, local-encrypted person
 - **Build:** `flutter pub get` | `flutter run`
 - **Test:** `flutter test` | `flutter test integration_test/system_integrity_test.dart`
 
-- Standalone Requirement: The Sensei agent must be implemented using a local LLM runner (e.g., Llama 3.2 via fllama). External AI APIs are strictly forbidden to maintain the Zero-Cloud policy.
+- Local-First Requirement: The Sensei agent must default to a local LLM runner (e.g., Llama via localhost). Optional online providers may be used only when explicitly selected and configured by the user.
 
 ## 📜 The 8 Scrolls (Core Context)
 Always reference these files for specific logic:
@@ -30,9 +30,11 @@ Always reference these files for specific logic:
 ## 🏗️ Architectural Rules
 1. **URI-First:** Every entity must be addressed via dot-notation (e.g., `dojo.con.name`).
 2. **Audit Requirement:** Every attribute change in `tbl_attributes` MUST link to a `last_rolo_id`.
-3. **Clean Architecture:** Strict separation between Data, Domain, and Presentation layers.
-4. **Security:** Never write keys to logs. Use `SecurityService` for all DB operations.
-5. **Dependency Injection:** Use `DojoProvider` (InheritedWidget) to access services. Never construct services manually in widgets.
+3. **Sensei Journal Requirement:** Every user summoning should store a linked Sensei response row in `tbl_sensei` via `input_rolo_id`.
+4. **Owner Profile Requirement:** User identity/preferences belong in `tbl_user`, not in contact records.
+5. **Clean Architecture:** Strict separation between Data, Domain, and Presentation layers.
+6. **Security:** Never write keys to logs. Use `SecurityService` for all DB operations.
+7. **Dependency Injection:** Use `DojoProvider` (InheritedWidget) to access services. Never construct services manually in widgets.
 
 ## 🚦 Operational Workflow
 - **Plan Mode:** Before writing code, describe the plan and wait for approval.

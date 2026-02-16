@@ -5,9 +5,14 @@ import '../data/datasources/local_data_source.dart';
 import '../data/repositories/rolo_repository_impl.dart';
 import '../data/repositories/record_repository_impl.dart';
 import '../data/repositories/attribute_repository_impl.dart';
+import '../data/repositories/sensei_repository_impl.dart';
+import '../data/repositories/user_repository_impl.dart';
 import '../domain/repositories/rolo_repository.dart';
 import '../domain/repositories/record_repository.dart';
 import '../domain/repositories/attribute_repository.dart';
+import '../domain/repositories/sensei_repository.dart';
+import '../domain/repositories/user_repository.dart';
+import '../domain/entities/user_profile.dart';
 import 'services/security_service.dart';
 import 'services/dojo_service.dart';
 import 'services/librarian_service.dart';
@@ -30,6 +35,8 @@ class DojoProvider extends InheritedWidget {
   final RoloRepository roloRepository;
   final RecordRepository recordRepository;
   final AttributeRepository attributeRepository;
+  final UserRepository userRepository;
+  final SenseiRepository senseiRepository;
 
   const DojoProvider({
     required this.dojoService,
@@ -40,6 +47,8 @@ class DojoProvider extends InheritedWidget {
     required this.roloRepository,
     required this.recordRepository,
     required this.attributeRepository,
+    required this.userRepository,
+    required this.senseiRepository,
     required super.child,
     super.key,
   });
@@ -67,7 +76,22 @@ class DojoProvider extends InheritedWidget {
     final roloRepo = RoloRepositoryImpl(dataSource);
     final recordRepo = RecordRepositoryImpl(dataSource);
     final attributeRepo = AttributeRepositoryImpl(dataSource);
+    final userRepo = UserRepositoryImpl(dataSource);
+    final senseiRepo = SenseiRepositoryImpl(dataSource);
     final locationService = LocationService();
+
+    final primaryUser = await userRepo.getPrimary();
+    if (primaryUser == null) {
+      final now = DateTime.now().toUtc();
+      await userRepo.upsert(
+        UserProfile(
+          userId: UserProfile.primaryUserId,
+          displayName: 'Dojo User',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+    }
 
     // Initialize LLM providers (local-first with optional online providers).
     const llmProviderRaw = String.fromEnvironment(
@@ -148,6 +172,8 @@ class DojoProvider extends InheritedWidget {
       recordRepository: recordRepo,
       attributeRepository: attributeRepo,
       senseiLlm: senseiLlm,
+      senseiRepository: senseiRepo,
+      userRepository: userRepo,
       locationService: locationService,
     );
 
@@ -179,6 +205,8 @@ class DojoProvider extends InheritedWidget {
       roloRepository: roloRepo,
       recordRepository: recordRepo,
       attributeRepository: attributeRepo,
+      userRepository: userRepo,
+      senseiRepository: senseiRepo,
       child: child,
     );
   }

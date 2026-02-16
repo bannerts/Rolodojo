@@ -2,6 +2,8 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../models/attribute_model.dart';
 import '../models/record_model.dart';
 import '../models/rolo_model.dart';
+import '../models/sensei_response_model.dart';
+import '../models/user_profile_model.dart';
 
 /// Local data source for database operations.
 ///
@@ -301,5 +303,81 @@ class LocalDataSource {
     ''', [subjectUri, '%$key%']);
 
     return results;
+  }
+
+  // ============================================================
+  // USER OPERATIONS (tbl_user - Owner Profile)
+  // ============================================================
+
+  /// Inserts or updates a user profile row.
+  Future<void> upsertUserProfile(UserProfileModel profile) async {
+    await _db.insert(
+      'tbl_user',
+      profile.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Retrieves a user profile by id.
+  Future<UserProfileModel?> getUserProfileById(String userId) async {
+    final results = await _db.query(
+      'tbl_user',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    if (results.isEmpty) return null;
+    return UserProfileModel.fromMap(results.first);
+  }
+
+  /// Retrieves the most recently updated user profile.
+  Future<UserProfileModel?> getPrimaryUserProfile() async {
+    final results = await _db.query(
+      'tbl_user',
+      orderBy: 'updated_at DESC',
+      limit: 1,
+    );
+    if (results.isEmpty) return null;
+    return UserProfileModel.fromMap(results.first);
+  }
+
+  // ============================================================
+  // SENSEI RESPONSE OPERATIONS (tbl_sensei - Assistant Outputs)
+  // ============================================================
+
+  /// Inserts a new Sensei response row.
+  Future<void> insertSenseiResponse(SenseiResponseModel response) async {
+    await _db.insert(
+      'tbl_sensei',
+      response.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.abort,
+    );
+  }
+
+  /// Retrieves responses generated for a specific input rolo.
+  Future<List<SenseiResponseModel>> getSenseiResponsesByInputRolo(
+    String inputRoloId,
+  ) async {
+    final results = await _db.query(
+      'tbl_sensei',
+      where: 'input_rolo_id = ?',
+      whereArgs: [inputRoloId],
+      orderBy: 'created_at DESC',
+    );
+    return results.map((r) => SenseiResponseModel.fromMap(r)).toList();
+  }
+
+  /// Retrieves recent Sensei responses with pagination.
+  Future<List<SenseiResponseModel>> getRecentSenseiResponses({
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    final results = await _db.query(
+      'tbl_sensei',
+      orderBy: 'created_at DESC',
+      limit: limit,
+      offset: offset,
+    );
+    return results.map((r) => SenseiResponseModel.fromMap(r)).toList();
   }
 }

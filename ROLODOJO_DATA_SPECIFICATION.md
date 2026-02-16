@@ -37,12 +37,41 @@ To prevent data fragmentation, the Sensei must enforce these formats:
 | **URIs** | Lowercase/Underscore | `dojo.con.joe_smith` |
 | **Coordinates** | Decimal Degrees | `29.1234, -95.5678` |
 
-## 3. Attribute Vault Rules
+## 3. User Profile Object (`tbl_user`)
+Dedicated owner profile data is stored outside URI contact records:
+
+{
+  "user_id": "owner",
+  "display_name": "Scott Bannert",
+  "preferred_name": "Scott",
+  "profile_json": {
+    "timezone": "America/Chicago",
+    "locale": "en_US"
+  },
+  "created_at": "2026-02-16T12:00:00Z",
+  "updated_at": "2026-02-16T12:00:00Z"
+}
+
+## 4. Sensei Response Object (`tbl_sensei`)
+Every user input should produce a stored Sensei response row:
+
+{
+  "sensei_id": "uuid-v4",
+  "input_rolo_id": "uuid-v4",
+  "target_uri": "dojo.con.joe",
+  "response_text": "Updated Joe's Coffee Preference to Espresso",
+  "provider": "llama",
+  "model": "llama3.3",
+  "confidence_score": 0.91,
+  "created_at": "2026-02-16T12:01:00Z"
+}
+
+## 5. Attribute Vault Rules
 - **Keys:** Use `snake_case` for all keys (e.g., `gate_code`, not `GateCode`).
 - **Secret Data:** If an attribute is marked `is_encrypted: 1` in the database, the value must be encrypted via SQLCipher before storage.
 - **Nullification:** When a user "removes" a fact, the value becomes `null` but the key remains to preserve the `last_rolo_id` audit link.
 
-## 4. Conflict Resolution
+## 6. Conflict Resolution
 - **Rule of Recency:** If two Rolos provide conflicting data for the same URI attribute, the Rolo with the latest `timestamp` wins.
 - **History:** The previous value is moved to a `history` array within the record's payload before being overwritten.
 - 

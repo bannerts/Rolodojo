@@ -22,7 +22,7 @@ class SecurityService {
   }
 
   /// Helper to open the database with SQLCipher encryption.
-  Future<Database> openEncryptedDatabase(String path, {int version = 1}) async {
+  Future<Database> openEncryptedDatabase(String path, {int version = 2}) async {
     final password = await getMasterKey();
     
     return await openDatabase(
@@ -33,6 +33,9 @@ class SecurityService {
         // This is where Claude Code will build the Rockstone Schema
         await _initializeSchema(db);
       },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        await _applyMigrations(db, oldVersion, newVersion);
+      },
     );
   }
 
@@ -40,11 +43,31 @@ class SecurityService {
     // Enable foreign key enforcement for SQLite
     await db.execute('PRAGMA foreign_keys = ON');
 
-    // Initializing the 3 Pillars of the Rockstone Schema
+    // Initializing the core Rockstone tables
 
-    // tbl_rolos - The Ledger (immutable history)
+    await _createRoloSchema(db);
+    await _createRecordSchema(db);
+    await _createAttributeSchema(db);
+    await _createUserSchema(db);
+    await _createSenseiSchema(db);
+  }
+
+  static Future<void> _applyMigrations(
+    Database db,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    await db.execute('PRAGMA foreign_keys = ON');
+
+    if (oldVersion < 2) {
+      await _createUserSchema(db);
+      await _createSenseiSchema(db);
+    }
+  }
+
+  static Future<void> _createRoloSchema(Database db) async {
     await db.execute('''
-      CREATE TABLE tbl_rolos (
+      CREATE TABLE IF NOT EXISTS tbl_rolos (
         rolo_id TEXT PRIMARY KEY,
         type TEXT NOT NULL,
         summoning_text TEXT,
@@ -57,20 +80,20 @@ class SecurityService {
       )
     ''');
 
-    // Indexes for tbl_rolos
     await db.execute(
-      'CREATE INDEX idx_rolos_target_uri ON tbl_rolos(target_uri)',
+      'CREATE INDEX IF NOT EXISTS idx_rolos_target_uri ON tbl_rolos(target_uri)',
     );
     await db.execute(
-      'CREATE INDEX idx_rolos_timestamp ON tbl_rolos(timestamp DESC)',
+      'CREATE INDEX IF NOT EXISTS idx_rolos_timestamp ON tbl_rolos(timestamp DESC)',
     );
     await db.execute(
-      'CREATE INDEX idx_rolos_parent ON tbl_rolos(parent_rolo_id)',
+      'CREATE INDEX IF NOT EXISTS idx_rolos_parent ON tbl_rolos(parent_rolo_id)',
     );
+  }
 
-    // tbl_records - The Master Scroll (current state of truth)
+  static Future<void> _createRecordSchema(Database db) async {
     await db.execute('''
-      CREATE TABLE tbl_records (
+      CREATE TABLE IF NOT EXISTS tbl_records (
         uri TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
         payload TEXT,
@@ -81,14 +104,14 @@ class SecurityService {
       )
     ''');
 
-    // Index for tbl_records
     await db.execute(
-      'CREATE INDEX idx_records_display_name ON tbl_records(display_name)',
+      'CREATE INDEX IF NOT EXISTS idx_records_display_name ON tbl_records(display_name)',
     );
+  }
 
-    // tbl_attributes - The Vault (flexible key-value storage)
+  static Future<void> _createAttributeSchema(Database db) async {
     await db.execute('''
-      CREATE TABLE tbl_attributes (
+      CREATE TABLE IF NOT EXISTS tbl_attributes (
         subject_uri TEXT NOT NULL,
         attr_key TEXT NOT NULL,
         attr_value TEXT,
@@ -103,9 +126,49 @@ class SecurityService {
       )
     ''');
 
-    // Indexes for tbl_attributes
     await db.execute(
-      'CREATE INDEX idx_attributes_key ON tbl_attributes(attr_key)',
+      'CREATE INDEX IF NOT EXISTS idx_attributes_key ON tbl_attributes(attr_key)',
+    );
+  }
+
+  static Future<void> _createUserSchema(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS tbl_user (
+        user_id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        preferred_name TEXT,
+        profile_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_user_updated_at ON tbl_user(updated_at DESC)',
+    );
+  }
+
+  static Future<void> _createSenseiSchema(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS tbl_sensei (
+        sensei_id TEXT PRIMARY KEY,
+        input_rolo_id TEXT NOT NULL,
+        target_uri TEXT,
+        response_text TEXT NOT NULL,
+        provider TEXT,
+        model TEXT,
+        confidence_score REAL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (input_rolo_id) REFERENCES tbl_rolos(rolo_id)
+          ON DELETE CASCADE
+      )
+    ''');
+
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sensei_input_rolo ON tbl_sensei(input_rolo_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sensei_created_at ON tbl_sensei(created_at DESC)',
     );
   }
 }

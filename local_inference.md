@@ -97,6 +97,8 @@ UI behavior when unhealthy:
 - No telemetry forwarding of user content.
 - No model requests to non-local hosts unless explicitly selected by the owner.
 - All resulting ledger writes still flow through normal audit path (`last_rolo_id` linkage).
+- Parsing context can include owner hints from `tbl_user` (name/timezone/locale).
+- Final Sensei text responses are persisted in `tbl_sensei` with source `input_rolo_id`.
 
 ## 7) Implementation Notes (Current)
 
