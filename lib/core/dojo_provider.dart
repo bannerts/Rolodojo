@@ -67,14 +67,22 @@ class DojoProvider extends InheritedWidget {
     final recordRepo = RecordRepositoryImpl(dataSource);
     final attributeRepo = AttributeRepositoryImpl(dataSource);
 
-    // Initialize local LLM (Llama 3.2 via fllama)
-    final senseiLlm = LocalLlmService();
+    // Initialize local LLM server (Ollama/OpenAI-compatible endpoint).
+    const llmBaseUrl = String.fromEnvironment(
+      'LLAMA_BASE_URL',
+      defaultValue: 'http://localhost:11434/v1',
+    );
+    const llmModel = String.fromEnvironment(
+      'LLAMA_MODEL',
+      defaultValue: 'llama3.3',
+    );
+    final senseiLlm = LocalLlmService(
+      baseUrl: llmBaseUrl,
+      modelName: llmModel,
+    );
     try {
-      // Model file path — in production, bundled as an asset or
-      // downloaded on first launch to the app's documents directory.
-      final modelDir = await getDatabasesPath();
-      final modelPath = path.join(modelDir, 'llama-3.2-3b-instruct.Q4_K_M.gguf');
-      await senseiLlm.initialize(modelPath: modelPath);
+      // modelPath is retained for interface compatibility.
+      await senseiLlm.initialize(modelPath: 'ollama://local-server');
     } catch (e) {
       // LLM initialization is non-fatal; rule-based fallback is used.
       debugPrint('[Sensei] LLM init skipped: $e');

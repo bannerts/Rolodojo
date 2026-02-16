@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../../core/constants/dojo_theme.dart';
 import '../../core/dojo_provider.dart';
 import '../../core/services/backup_service.dart';
 import '../../core/services/biometric_service.dart';
 import '../../core/services/optimization_service.dart';
+import '../../core/services/sensei_llm_service.dart';
 
 /// The Dojo settings page.
 ///
@@ -29,11 +32,51 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _biometricsAvailable = false;
   bool _isExporting = false;
   bool _isImporting = false;
+  bool _isCheckingLlm = false;
+  SenseiLlmService? _senseiLlm;
+  LlmHealthStatus _llmHealthStatus = const LlmHealthStatus();
 
   @override
   void initState() {
     super.initState();
     _checkBiometrics();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _bindLlmService();
+  }
+
+  @override
+  void dispose() {
+    _senseiLlm?.healthStatus.removeListener(_handleLlmHealthChanged);
+    super.dispose();
+  }
+
+  void _bindLlmService() {
+    final provider = DojoProvider.of(context);
+    final nextService = provider.senseiLlm;
+    if (identical(_senseiLlm, nextService)) {
+      return;
+    }
+
+    _senseiLlm?.healthStatus.removeListener(_handleLlmHealthChanged);
+    _senseiLlm = nextService;
+    _senseiLlm!.healthStatus.addListener(_handleLlmHealthChanged);
+    _llmHealthStatus = _senseiLlm!.healthStatus.value;
+
+    if (_llmHealthStatus.checkedAt == null) {
+      unawaited(_refreshLlmHealth());
+    }
+  }
+
+  void _handleLlmHealthChanged() {
+    final next = _senseiLlm?.healthStatus.value;
+    if (!mounted || next == null) return;
+    setState(() {
+      _llmHealthStatus = next;
+    });
   }
 
   Future<void> _checkBiometrics() async {
@@ -129,6 +172,52 @@ class _SettingsPageState extends State<SettingsPage> {
                 Icons.check_circle,
                 color: DojoColors.success,
               ),
+            ),
+          ]),
+
+          const SizedBox(height: DojoDimens.paddingMedium),
+
+          // Local LLM Section
+          _buildSectionHeader('Local Llama'),
+          _buildSettingsCard([
+            _buildSettingsTile(
+              icon: _llmHealthStatus.isHealthy
+                  ? Icons.check_circle
+                  : Icons.warning_amber_rounded,
+              title: 'Local LLM Server',
+              subtitle: _llmHealthStatus.checkedAt == null
+                  ? 'Checking local server health...'
+                  : _llmHealthStatus.message,
+              trailing: _isCheckingLlm
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: DojoColors.senseiGold,
+                      ),
+                    )
+                  : TextButton(
+                      onPressed: _refreshLlmHealth,
+                      child: const Text('Check'),
+                    ),
+            ),
+            const Divider(color: DojoColors.border, height: 1),
+            _buildSettingsTile(
+              icon: Icons.hub_outlined,
+              title: 'Endpoint',
+              subtitle: _senseiLlm?.baseUrl ?? 'Not configured',
+              trailing: null,
+            ),
+            const Divider(color: DojoColors.border, height: 1),
+            _buildSettingsTile(
+              icon: Icons.smart_toy_outlined,
+              title: 'Model',
+              subtitle: _senseiLlm == null
+                  ? 'Not configured'
+                  : 'active: ${_senseiLlm!.activeModelName} / configured: '
+                      '${_senseiLlm!.configuredModelName}',
+              trailing: null,
             ),
           ]),
 
@@ -360,6 +449,24 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
+  }
+
+  Future<void> _refreshLlmHealth() async {
+    if (_isCheckingLlm || _senseiLlm == null) {
+      return;
+    }
+    setState(() {
+      _isCheckingLlm = true;
+    });
+    try {
+      await _senseiLlm!.checkHealth(force: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCheckingLlm = false;
+        });
+      }
+    }
   }
 
   void _showOptimizationDialog() {
