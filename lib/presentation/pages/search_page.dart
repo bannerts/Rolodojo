@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import '../../core/constants/dojo_theme.dart';
-import '../../core/services/input_parser.dart';
 import '../../core/services/librarian_service.dart';
 import '../../domain/entities/attribute.dart';
 import '../../domain/entities/record.dart';

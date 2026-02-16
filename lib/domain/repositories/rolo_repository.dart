@@ -35,6 +35,12 @@ abstract class RoloRepository {
   /// Returns Rolos where the summoning_text contains [query].
   Future<List<Rolo>> search(String query);
 
+  /// Updates an existing Rolo in-place (Ghost optimization only).
+  ///
+  /// This is the only mutation allowed on tbl_rolos, used exclusively
+  /// by the Ghost optimization to compress old summoning text.
+  Future<void> update(Rolo rolo);
+
   /// Returns the total count of Rolos in the ledger.
   Future<int> count();
 }

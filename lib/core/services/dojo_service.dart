@@ -7,6 +7,7 @@ import '../../domain/repositories/attribute_repository.dart';
 import '../../domain/repositories/record_repository.dart';
 import '../../domain/repositories/rolo_repository.dart';
 import 'input_parser.dart';
+import 'sensei_llm_service.dart';
 
 /// Result of processing a summoning (user input).
 class SummoningResult {
@@ -47,6 +48,7 @@ class DojoService {
   final RecordRepository _recordRepository;
   final AttributeRepository _attributeRepository;
   final InputParser _inputParser;
+  final SenseiLlmService? _senseiLlm;
   final Uuid _uuid;
 
   DojoService({
@@ -54,10 +56,12 @@ class DojoService {
     required RecordRepository recordRepository,
     required AttributeRepository attributeRepository,
     InputParser? inputParser,
+    SenseiLlmService? senseiLlm,
   })  : _roloRepository = roloRepository,
         _recordRepository = recordRepository,
         _attributeRepository = attributeRepository,
         _inputParser = inputParser ?? InputParser(),
+        _senseiLlm = senseiLlm,
         _uuid = const Uuid();
 
   /// Processes a user summoning (text input) and creates appropriate records.
@@ -71,8 +75,26 @@ class DojoService {
     String input, {
     RoloMetadata metadata = RoloMetadata.empty,
   }) async {
-    // Parse the input
-    final parsed = _inputParser.parse(input);
+    // Parse the input — use local LLM if available, fall back to regex
+    var parsed = _inputParser.parse(input);
+
+    if (!parsed.canCreateAttribute && _senseiLlm != null && _senseiLlm!.isReady) {
+      // LLM may extract structure that regex missed
+      final llmResult = await _senseiLlm!.parseInput(input);
+      if (llmResult.canCreateAttribute && llmResult.confidence > parsed.confidence) {
+        parsed = ParsedInput(
+          subjectName: llmResult.subjectName,
+          subjectUri: llmResult.subjectName != null
+              ? _inputParser.parse("${llmResult.subjectName}'s x is y").subjectUri
+              : null,
+          attributeKey: llmResult.attributeKey,
+          attributeValue: llmResult.attributeValue,
+          isQuery: llmResult.isQuery,
+          confidence: llmResult.confidence,
+          originalText: input,
+        );
+      }
+    }
 
     // Create the Rolo
     final roloId = _uuid.v4();

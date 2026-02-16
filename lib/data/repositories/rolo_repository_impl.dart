@@ -47,6 +47,12 @@ class RoloRepositoryImpl implements RoloRepository {
   }
 
   @override
+  Future<void> update(Rolo rolo) async {
+    final model = RoloModel.fromEntity(rolo);
+    await _dataSource.updateRolo(model);
+  }
+
+  @override
   Future<int> count() async {
     return _dataSource.countRolos();
   }

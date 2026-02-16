@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../core/constants/dojo_theme.dart';
-import '../../core/services/input_parser.dart';
-import '../../core/utils/uri_utils.dart';
+import '../../core/dojo_provider.dart';
+import '../../core/services/synthesis_service.dart';
+import '../../domain/entities/attribute.dart';
+import '../../domain/entities/rolo.dart';
 import '../widgets/flip_card.dart';
 import '../widgets/sensei_bar.dart';
 import 'search_page.dart';
@@ -20,66 +22,82 @@ class DojoHomePage extends StatefulWidget {
 
 class _DojoHomePageState extends State<DojoHomePage> {
   SenseiState _senseiState = SenseiState.idle;
-  final List<_RoloPreview> _recentRolos = [];
-  final InputParser _parser = InputParser();
+  List<Rolo> _recentRolos = [];
+  bool _isLoading = true;
+  String? _lastSynthesisMessage;
+  List<SynthesisSuggestion> _pendingSuggestions = [];
 
-  void _handleSummon(String text) {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_isLoading) {
+      _loadRecentRolos();
+    }
+  }
+
+  Future<void> _loadRecentRolos() async {
+    final dojo = DojoProvider.of(context).dojoService;
+    final rolos = await dojo.getRecentRolos(limit: 50);
+    if (mounted) {
+      setState(() {
+        _recentRolos = rolos;
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _handleSummon(String text) async {
     setState(() {
       _senseiState = SenseiState.thinking;
     });
 
-    // Parse the input
-    final parsed = _parser.parse(text);
+    try {
+      final dojo = DojoProvider.of(context).dojoService;
+      final result = await dojo.processSummoning(text);
 
-    // Simulate processing delay
-    Future.delayed(const Duration(milliseconds: 600), () {
       if (mounted) {
-        // Create the input Rolo
-        final inputRolo = _RoloPreview(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          text: text,
-          timestamp: DateTime.now(),
-          type: parsed.isQuery ? 'REQUEST' : 'INPUT',
-        );
-
         setState(() {
-          _recentRolos.insert(0, inputRolo);
+          _senseiState =
+              result.attribute != null ? SenseiState.synthesis : SenseiState.idle;
+          _lastSynthesisMessage =
+              result.attribute != null ? result.message : null;
         });
 
-        // If structured data was extracted, show synthesis
-        if (parsed.canCreateAttribute) {
-          Future.delayed(const Duration(milliseconds: 400), () {
+        await _loadRecentRolos();
+
+        // Check for synthesis suggestions from the new Rolo
+        final synthesisService = DojoProvider.of(context).synthesisService;
+        final suggestions = await synthesisService.analyzeRolo(result.rolo);
+        if (mounted && suggestions.isNotEmpty) {
+          setState(() {
+            _pendingSuggestions = suggestions;
+          });
+        }
+
+        if (result.attribute != null) {
+          Future.delayed(const Duration(seconds: 2), () {
             if (mounted) {
-              final synthesisRolo = _RoloPreview(
-                id: '${DateTime.now().millisecondsSinceEpoch}_synth',
-                text: 'Updated ${parsed.subjectName}\'s ${_formatKey(parsed.attributeKey!)} to "${parsed.attributeValue}"',
-                timestamp: DateTime.now(),
-                type: 'SYNTHESIS',
-                parsedData: parsed,
-              );
-
               setState(() {
-                _recentRolos.insert(0, synthesisRolo);
-                _senseiState = SenseiState.synthesis;
-              });
-
-              // Reset to idle
-              Future.delayed(const Duration(seconds: 1), () {
-                if (mounted) {
-                  setState(() {
-                    _senseiState = SenseiState.idle;
-                  });
-                }
+                _senseiState = SenseiState.idle;
+                _lastSynthesisMessage = null;
               });
             }
           });
-        } else {
-          setState(() {
-            _senseiState = SenseiState.idle;
-          });
         }
       }
-    });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _senseiState = SenseiState.idle;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: DojoColors.alert,
+          ),
+        );
+      }
+    }
   }
 
   String _formatKey(String key) {
@@ -91,14 +109,13 @@ class _DojoHomePageState extends State<DojoHomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final provider = DojoProvider.of(context);
+
     return Scaffold(
       appBar: AppBar(
         title: const Row(
           children: [
-            Text(
-              '🥋',
-              style: TextStyle(fontSize: 24),
-            ),
+            Text('🥋', style: TextStyle(fontSize: 24)),
             SizedBox(width: DojoDimens.paddingSmall),
             Text('ROLODOJO'),
           ],
@@ -106,15 +123,19 @@ class _DojoHomePageState extends State<DojoHomePage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.folder_outlined),
-            onPressed: () {
-              _showVaultView(context);
-            },
+            onPressed: () => _showVaultView(context),
             tooltip: 'View Vault',
           ),
           IconButton(
             icon: const Icon(Icons.search),
             onPressed: () {
-              _showSearchDialog(context);
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => SearchPage(
+                    librarianService: provider.librarianService,
+                  ),
+                ),
+              );
             },
             tooltip: 'Search the Vault',
           ),
@@ -123,7 +144,9 @@ class _DojoHomePageState extends State<DojoHomePage> {
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (context) => const SettingsPage(),
+                  builder: (context) => SettingsPage(
+                    backupService: provider.backupService,
+                  ),
                 ),
               );
             },
@@ -133,14 +156,39 @@ class _DojoHomePageState extends State<DojoHomePage> {
       ),
       body: Column(
         children: [
-          // The Stream - Chronological feed of Rolos
+          if (_lastSynthesisMessage != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(
+                horizontal: DojoDimens.paddingMedium,
+                vertical: DojoDimens.paddingSmall,
+              ),
+              color: DojoColors.success.withOpacity(0.15),
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle, color: DojoColors.success, size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _lastSynthesisMessage!,
+                      style: const TextStyle(color: DojoColors.success, fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          // Synthesis suggestion cards
+          if (_pendingSuggestions.isNotEmpty)
+            _buildSuggestionBanner(),
           Expanded(
-            child: _recentRolos.isEmpty
-                ? _buildEmptyState()
-                : _buildStream(),
+            child: _isLoading
+                ? const Center(
+                    child: CircularProgressIndicator(color: DojoColors.senseiGold),
+                  )
+                : _recentRolos.isEmpty
+                    ? _buildEmptyState()
+                    : _buildStream(),
           ),
-
-          // The Sensei Bar - Persistent bottom input
           SenseiBar(
             state: _senseiState,
             onSubmit: _handleSummon,
@@ -148,6 +196,97 @@ class _DojoHomePageState extends State<DojoHomePage> {
         ],
       ),
     );
+  }
+
+  Widget _buildSuggestionBanner() {
+    return Container(
+      margin: const EdgeInsets.symmetric(
+        horizontal: DojoDimens.paddingMedium,
+        vertical: DojoDimens.paddingSmall,
+      ),
+      padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+      decoration: BoxDecoration(
+        color: DojoColors.senseiGold.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(DojoDimens.cardRadius),
+        border: Border.all(color: DojoColors.senseiGold.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.auto_awesome, color: DojoColors.senseiGold, size: 16),
+              SizedBox(width: 8),
+              Text(
+                'Sensei Suggestion',
+                style: TextStyle(
+                  color: DojoColors.senseiGold,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ..._pendingSuggestions.map((s) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${_formatKey(s.attributeKey)}: ${s.attributeValue}  '
+                        '(${(s.confidence * 100).toInt()}%)',
+                        style: const TextStyle(
+                          color: DojoColors.textPrimary,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.check_circle,
+                        color: DojoColors.success,
+                        size: 20,
+                      ),
+                      onPressed: () => _acceptSuggestion(s),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.cancel,
+                        color: DojoColors.alert,
+                        size: 20,
+                      ),
+                      onPressed: () => _dismissSuggestion(s),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                  ],
+                ),
+              )),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _acceptSuggestion(SynthesisSuggestion suggestion) async {
+    final dojo = DojoProvider.of(context).dojoService;
+    await dojo.processSummoning(
+      "Set ${suggestion.targetUri.split('.').last}'s "
+      '${suggestion.attributeKey} to ${suggestion.attributeValue}',
+    );
+    setState(() {
+      _pendingSuggestions.remove(suggestion);
+    });
+    await _loadRecentRolos();
+  }
+
+  void _dismissSuggestion(SynthesisSuggestion suggestion) {
+    setState(() {
+      _pendingSuggestions.remove(suggestion);
+    });
   }
 
   Widget _buildEmptyState() {
@@ -192,10 +331,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
         children: [
           const Row(
             children: [
-              Icon(Icons.lightbulb_outline,
-                color: DojoColors.senseiGold,
-                size: 16,
-              ),
+              Icon(Icons.lightbulb_outline, color: DojoColors.senseiGold, size: 16),
               SizedBox(width: 8),
               Text(
                 'Try saying:',
@@ -240,7 +376,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
   Widget _buildStream() {
     return ListView.builder(
       padding: const EdgeInsets.all(DojoDimens.paddingMedium),
-      reverse: true, // Newest at bottom (per UX spec)
+      reverse: true,
       itemCount: _recentRolos.length,
       itemBuilder: (context, index) {
         final rolo = _recentRolos[index];
@@ -252,7 +388,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
     );
   }
 
-  void _showRoloDetails(BuildContext context, _RoloPreview rolo) {
+  void _showRoloDetails(BuildContext context, Rolo rolo) {
     showModalBottomSheet(
       context: context,
       backgroundColor: DojoColors.graphite,
@@ -276,7 +412,7 @@ class _DojoHomePageState extends State<DojoHomePage> {
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
-                    rolo.type,
+                    rolo.type.value,
                     style: const TextStyle(
                       color: DojoColors.slate,
                       fontWeight: FontWeight.bold,
@@ -302,26 +438,22 @@ class _DojoHomePageState extends State<DojoHomePage> {
             ),
             const SizedBox(height: 4),
             Text(
-              rolo.text,
+              rolo.summoningText,
               style: const TextStyle(color: DojoColors.textPrimary, fontSize: 15),
             ),
-            if (rolo.parsedData != null) ...[
+            if (rolo.targetUri != null) ...[
               const SizedBox(height: 16),
               const Divider(color: DojoColors.border),
               const SizedBox(height: 8),
-              const Text(
-                'Extracted Data:',
-                style: TextStyle(color: DojoColors.textHint, fontSize: 12),
-              ),
-              const SizedBox(height: 8),
-              _buildParsedDataRow('Subject', rolo.parsedData!.subjectName),
-              _buildParsedDataRow('URI', rolo.parsedData!.subjectUri?.toString()),
-              _buildParsedDataRow('Attribute', rolo.parsedData!.attributeKey),
-              _buildParsedDataRow('Value', rolo.parsedData!.attributeValue),
-              _buildParsedDataRow(
-                'Confidence',
-                '${(rolo.parsedData!.confidence * 100).toInt()}%',
-              ),
+              _buildDetailRow('Target URI', rolo.targetUri),
+              _buildDetailRow('Timestamp', rolo.timestamp.toIso8601String()),
+              if (rolo.metadata.trigger != null)
+                _buildDetailRow('Trigger', rolo.metadata.trigger),
+              if (rolo.metadata.confidenceScore != null)
+                _buildDetailRow(
+                  'Confidence',
+                  '${(rolo.metadata.confidenceScore! * 100).toInt()}%',
+                ),
             ],
             const SizedBox(height: 16),
           ],
@@ -330,13 +462,13 @@ class _DojoHomePageState extends State<DojoHomePage> {
     );
   }
 
-  Widget _buildParsedDataRow(String label, String? value) {
+  Widget _buildDetailRow(String label, String? value) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: Row(
         children: [
           SizedBox(
-            width: 80,
+            width: 100,
             child: Text(
               label,
               style: const TextStyle(color: DojoColors.textHint, fontSize: 12),
@@ -356,14 +488,30 @@ class _DojoHomePageState extends State<DojoHomePage> {
     );
   }
 
-  void _showVaultView(BuildContext context) {
-    // Extract unique subjects from rolos with parsed data
-    final subjects = <String, ParsedInput>{};
-    for (final rolo in _recentRolos) {
-      if (rolo.parsedData?.subjectUri != null) {
-        subjects[rolo.parsedData!.subjectUri!.toString()] = rolo.parsedData!;
+  void _showVaultView(BuildContext context) async {
+    final dojo = DojoProvider.of(context).dojoService;
+    final provider = DojoProvider.of(context);
+    final records = await provider.recordRepository.getAll();
+
+    final recordAttributes = <String, List<Attribute>>{};
+    final roloTexts = <String, String>{};
+    for (final record in records) {
+      final attrs = await dojo.getAttributes(record.uri);
+      if (attrs.isNotEmpty) {
+        recordAttributes[record.uri] = attrs;
+        // Load the source Rolo's summoning text for each attribute
+        for (final attr in attrs) {
+          if (!roloTexts.containsKey(attr.lastRoloId)) {
+            final rolo = await dojo.getRolo(attr.lastRoloId);
+            if (rolo != null) {
+              roloTexts[attr.lastRoloId] = rolo.summoningText;
+            }
+          }
+        }
       }
     }
+
+    if (!mounted) return;
 
     showModalBottomSheet(
       context: context,
@@ -397,18 +545,15 @@ class _DojoHomePageState extends State<DojoHomePage> {
                   ),
                   const Spacer(),
                   Text(
-                    '${subjects.length} records',
-                    style: const TextStyle(
-                      color: DojoColors.textHint,
-                      fontSize: 12,
-                    ),
+                    '${records.length} records',
+                    style: const TextStyle(color: DojoColors.textHint, fontSize: 12),
                   ),
                 ],
               ),
             ),
             const Divider(color: DojoColors.border, height: 1),
             Expanded(
-              child: subjects.isEmpty
+              child: recordAttributes.isEmpty
                   ? const Center(
                       child: Text(
                         'No records yet',
@@ -418,16 +563,17 @@ class _DojoHomePageState extends State<DojoHomePage> {
                   : ListView.builder(
                       controller: scrollController,
                       padding: const EdgeInsets.all(DojoDimens.paddingMedium),
-                      itemCount: subjects.length,
+                      itemCount: recordAttributes.length,
                       itemBuilder: (context, index) {
-                        final uri = subjects.keys.elementAt(index);
-                        final data = subjects[uri]!;
-                        return AttributeFlipCard(
-                          attributeKey: data.attributeKey!,
-                          attributeValue: data.attributeValue,
-                          roloId: DateTime.now().millisecondsSinceEpoch.toString(),
-                          summoningText: data.originalText,
-                          timestamp: DateTime.now(),
+                        final uri = recordAttributes.keys.elementAt(index);
+                        final attrs = recordAttributes[uri]!;
+                        final record = records.firstWhere((r) => r.uri == uri);
+
+                        return _VaultRecordCard(
+                          uri: uri,
+                          displayName: record.displayName,
+                          attributes: attrs,
+                          roloTexts: roloTexts,
                         );
                       },
                     ),
@@ -438,48 +584,21 @@ class _DojoHomePageState extends State<DojoHomePage> {
     );
   }
 
-  void _showSearchDialog(BuildContext context) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => const SearchPage(),
-      ),
-    );
-  }
-
-  Color _getTypeBadgeColor(String type) {
+  Color _getTypeBadgeColor(RoloType type) {
     switch (type) {
-      case 'INPUT':
+      case RoloType.input:
         return DojoColors.senseiGold;
-      case 'SYNTHESIS':
+      case RoloType.synthesis:
         return DojoColors.success;
-      case 'REQUEST':
+      case RoloType.request:
         return DojoColors.textSecondary;
-      default:
-        return DojoColors.textHint;
     }
   }
 }
 
-/// Preview model for displaying Rolos in the stream.
-class _RoloPreview {
-  final String id;
-  final String text;
-  final DateTime timestamp;
-  final String type;
-  final ParsedInput? parsedData;
-
-  const _RoloPreview({
-    required this.id,
-    required this.text,
-    required this.timestamp,
-    required this.type,
-    this.parsedData,
-  });
-}
-
 /// A card representing a single Rolo in the stream.
 class _RoloCard extends StatelessWidget {
-  final _RoloPreview rolo;
+  final Rolo rolo;
   final VoidCallback? onTap;
 
   const _RoloCard({required this.rolo, this.onTap});
@@ -495,20 +614,16 @@ class _RoloCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Header with type badge and timestamp
               Row(
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
                       color: _getTypeBadgeColor(),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(
-                      rolo.type,
+                      rolo.type.value,
                       style: const TextStyle(
                         fontSize: 10,
                         fontWeight: FontWeight.bold,
@@ -519,39 +634,25 @@ class _RoloCard extends StatelessWidget {
                   const Spacer(),
                   Text(
                     _formatTimestamp(rolo.timestamp),
-                    style: const TextStyle(
-                      color: DojoColors.textHint,
-                      fontSize: 12,
-                    ),
+                    style: const TextStyle(color: DojoColors.textHint, fontSize: 12),
                   ),
                 ],
               ),
               const SizedBox(height: DojoDimens.paddingSmall),
-
-              // Summoning text
               Text(
-                rolo.text,
-                style: const TextStyle(
-                  color: DojoColors.textPrimary,
-                  fontSize: 15,
-                ),
+                rolo.summoningText,
+                style: const TextStyle(color: DojoColors.textPrimary, fontSize: 15),
               ),
-
-              // Parsed data indicator
-              if (rolo.parsedData?.canCreateAttribute == true) ...[
+              if (rolo.targetUri != null) ...[
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    const Icon(
-                      Icons.check_circle_outline,
-                      color: DojoColors.success,
-                      size: 14,
-                    ),
+                    const Icon(Icons.link, color: DojoColors.senseiGold, size: 14),
                     const SizedBox(width: 4),
                     Text(
-                      '${rolo.parsedData!.subjectUri} → ${rolo.parsedData!.attributeKey}',
+                      rolo.targetUri!,
                       style: const TextStyle(
-                        color: DojoColors.success,
+                        color: DojoColors.senseiGold,
                         fontSize: 11,
                       ),
                     ),
@@ -567,14 +668,12 @@ class _RoloCard extends StatelessWidget {
 
   Color _getTypeBadgeColor() {
     switch (rolo.type) {
-      case 'INPUT':
+      case RoloType.input:
         return DojoColors.senseiGold;
-      case 'SYNTHESIS':
+      case RoloType.synthesis:
         return DojoColors.success;
-      case 'REQUEST':
+      case RoloType.request:
         return DojoColors.textSecondary;
-      default:
-        return DojoColors.textHint;
     }
   }
 
@@ -591,5 +690,67 @@ class _RoloCard extends StatelessWidget {
     } else {
       return '${dt.month}/${dt.day}';
     }
+  }
+}
+
+/// Card showing a record and its attributes in the Vault view.
+class _VaultRecordCard extends StatelessWidget {
+  final String uri;
+  final String displayName;
+  final List<Attribute> attributes;
+  final Map<String, String> roloTexts;
+
+  const _VaultRecordCard({
+    required this.uri,
+    required this.displayName,
+    required this.attributes,
+    this.roloTexts = const {},
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: DojoDimens.paddingSmall),
+      child: Padding(
+        padding: const EdgeInsets.all(DojoDimens.paddingMedium),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    displayName,
+                    style: const TextStyle(
+                      color: DojoColors.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                Text(
+                  uri,
+                  style: const TextStyle(
+                    color: DojoColors.senseiGold,
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Divider(color: DojoColors.border, height: 1),
+            const SizedBox(height: 8),
+            ...attributes.map((attr) => AttributeFlipCard(
+                  attributeKey: attr.key,
+                  attributeValue: attr.value,
+                  roloId: attr.lastRoloId,
+                  summoningText: roloTexts[attr.lastRoloId],
+                  timestamp: attr.updatedAt ?? DateTime.now(),
+                )),
+          ],
+        ),
+      ),
+    );
   }
 }

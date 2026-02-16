@@ -163,10 +163,8 @@ class OptimizationService {
 
   /// Performs the optimization, ghosting eligible Rolos.
   ///
-  /// Returns statistics about the optimization.
-  ///
-  /// NOTE: In production, this would update Rolos in place.
-  /// For now, it simulates the process.
+  /// Compresses old Rolos by replacing their summoning text
+  /// with a short summary while preserving IDs and audit trail.
   Future<OptimizationStats> optimize() async {
     final startTime = DateTime.now();
     final allRolos = await _roloRepository.getRecent(limit: 100000);
@@ -179,8 +177,7 @@ class OptimizationService {
       if (_canGhost(rolo, cutoffDate)) {
         final ghost = GhostRolo.fromRolo(rolo);
 
-        // In production: update the Rolo in the database
-        // await _roloRepository.update(ghost.toRolo());
+        await _roloRepository.update(ghost.toRolo());
 
         ghostedCount++;
         spaceSaved += ghost.bytesSaved.clamp(0, 10000);

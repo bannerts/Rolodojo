@@ -14,6 +14,13 @@ dependencies:
   flutter_secure_storage: ^9.0.0
   local_auth: ^2.1.6
   
+  # Local LLM (Llama 3.2 via llama.cpp FFI bindings)
+  # Zero-Cloud policy: all inference runs on-device
+  fllama: ^0.5.0
+
+  # Encryption (AES-256-CBC for backup files)
+  encrypt: ^5.0.3
+
   # Utilities
   uuid: ^4.2.2
   path: ^1.8.3

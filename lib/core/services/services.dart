@@ -7,6 +7,7 @@ export 'input_parser.dart';
 export 'librarian_service.dart';
 export 'optimization_service.dart';
 export 'security_service.dart';
+export 'sensei_llm_service.dart';
 export 'synthesis_service.dart';
 export 'telephony_service.dart';
 export 'uri_router.dart';
