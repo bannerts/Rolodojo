@@ -40,6 +40,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _isImporting = false;
   bool _isCheckingLlm = false;
   bool _isSwitchingLlmProvider = false;
+  bool _isSavingApiKey = false;
   bool _isLoadingProfile = false;
   bool _isSavingProfile = false;
   bool _profileLoaded = false;
@@ -271,7 +272,21 @@ class _SettingsPageState extends State<SettingsPage> {
               icon: Icons.vpn_key_outlined,
               title: 'Credentials',
               subtitle: _providerCredentialStatus(),
-              trailing: null,
+              trailing: _selectedProvider.isLocal
+                  ? null
+                  : _isSavingApiKey
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: DojoColors.senseiGold,
+                          ),
+                        )
+                      : const Icon(Icons.chevron_right, color: DojoColors.textHint),
+              onTap: _selectedProvider.isLocal || _isSavingApiKey
+                  ? null
+                  : _showApiKeyEditorDialog,
             ),
           ]),
 
@@ -707,11 +722,156 @@ class _SettingsPageState extends State<SettingsPage> {
     if (_selectedProvider.isLocal) {
       return 'No API key required for local provider';
     }
-    if (_llmHealthStatus.provider == _selectedProvider &&
-        _llmHealthStatus.apiKeyConfigured) {
-      return 'API key detected via ${_selectedProvider.apiKeyEnvVar}';
+    if (_senseiLlm?.isApiKeyConfigured(_selectedProvider) == true) {
+      return 'API key configured (stored on this device)';
     }
-    return 'Missing API key. Set ${_selectedProvider.apiKeyEnvVar}.';
+    return 'Missing API key. Tap to add.';
+  }
+
+  Future<void> _showApiKeyEditorDialog() async {
+    final senseiLlm = _senseiLlm;
+    if (senseiLlm == null || _selectedProvider.isLocal) {
+      return;
+    }
+
+    final controller = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (dialogContext) {
+        var obscure = true;
+        var isSubmitting = false;
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> submit({required bool clear}) async {
+              final apiKey = clear ? '' : controller.text.trim();
+              if (!clear && apiKey.isEmpty) {
+                _showSnackBar('Enter an API key or tap Clear');
+                return;
+              }
+
+              setDialogState(() {
+                isSubmitting = true;
+              });
+              if (mounted) {
+                setState(() {
+                  _isSavingApiKey = true;
+                });
+              }
+
+              try {
+                await senseiLlm.setApiKey(_selectedProvider, apiKey);
+                await senseiLlm.checkHealth(force: true);
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop();
+                }
+                if (mounted) {
+                  _showSnackBar(
+                    clear
+                        ? 'API key cleared for ${_selectedProvider.label}'
+                        : 'API key saved for ${_selectedProvider.label}',
+                  );
+                }
+              } catch (e) {
+                if (mounted) {
+                  _showSnackBar('Failed to update API key: $e');
+                }
+                if (dialogContext.mounted) {
+                  setDialogState(() {
+                    isSubmitting = false;
+                  });
+                }
+              } finally {
+                if (mounted) {
+                  setState(() {
+                    _isSavingApiKey = false;
+                  });
+                }
+              }
+            }
+
+            return AlertDialog(
+              backgroundColor: DojoColors.graphite,
+              title: Row(
+                children: [
+                  const Icon(Icons.vpn_key_outlined, color: DojoColors.senseiGold),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${_selectedProvider.label} API Key',
+                      style: const TextStyle(color: DojoColors.textPrimary),
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Stored securely on this device. Existing keys are never shown.',
+                    style: TextStyle(color: DojoColors.textHint, fontSize: 12),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    obscureText: obscure,
+                    enabled: !isSubmitting,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    style: const TextStyle(color: DojoColors.textPrimary),
+                    decoration: InputDecoration(
+                      labelText: 'API Key',
+                      hintText: 'Paste key for ${_selectedProvider.label}',
+                      suffixIcon: IconButton(
+                        onPressed: isSubmitting
+                            ? null
+                            : () {
+                                setDialogState(() {
+                                  obscure = !obscure;
+                                });
+                              },
+                        icon: Icon(
+                          obscure ? Icons.visibility_off : Icons.visibility,
+                          color: DojoColors.textHint,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isSubmitting
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: isSubmitting ? null : () => submit(clear: true),
+                  child: const Text('Clear'),
+                ),
+                ElevatedButton(
+                  onPressed: isSubmitting ? null : () => submit(clear: false),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: DojoColors.senseiGold,
+                    foregroundColor: DojoColors.slate,
+                  ),
+                  child: isSubmitting
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    controller.dispose();
   }
 
   void _showLlmProviderPicker() {

@@ -409,12 +409,16 @@ class DojoService {
         : dayEntries;
 
     final responseType = _resolveJournalResponseType(trimmed);
-    final responseText = switch (responseType) {
-      JournalEntryType.dailySummary => await _buildDailySummaryBlock(now),
-      JournalEntryType.weeklySummary => await _buildWeeklySummaryBlock(now),
-      JournalEntryType.recall => _buildJournalRecallResponse(trimmed, sourceEntries),
-      _ => _buildJournalFollowUpResponse(sourceEntries),
-    };
+    late final String responseText;
+    if (responseType == JournalEntryType.dailySummary) {
+      responseText = await _buildDailySummaryBlock(now);
+    } else if (responseType == JournalEntryType.weeklySummary) {
+      responseText = await _buildWeeklySummaryBlock(now);
+    } else if (responseType == JournalEntryType.recall) {
+      responseText = _buildJournalRecallResponse(trimmed, sourceEntries);
+    } else {
+      responseText = _buildJournalFollowUpResponse(sourceEntries);
+    }
 
     final senseiEntry = JournalEntry(
       id: _uuid.v4(),
@@ -820,7 +824,7 @@ class DojoService {
     );
     final placePattern = RegExp(
       r'\b(?:at|to|in|visited|went to|drove to|walked to)\s+'
-      r'([A-Za-z][A-Za-z0-9\'\-\s]{1,40})',
+      r"([A-Za-z][A-Za-z0-9'\-\s]{1,40})",
       caseSensitive: false,
     );
 
