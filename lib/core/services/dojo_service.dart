@@ -721,7 +721,7 @@ class DojoService {
         );
         final normalized = llmAnswer.trim();
         if (normalized.isNotEmpty) {
-          return normalized;
+          return '$normalized\n\n${_buildSourcesUsedSection(bundle.sourcesUsed)}';
         }
       } catch (e) {
         debugPrint('[DojoService] Query answer via LLM failed: $e');
@@ -730,11 +730,13 @@ class DojoService {
 
     if (!bundle.hasFacts) {
       return 'I searched your vault but could not find enough related facts '
-          'for that question yet.';
+          'for that question yet.\n\n'
+          '${_buildSourcesUsedSection(bundle.sourcesUsed)}';
     }
 
     return 'I found related vault facts, but could not produce a complete '
-        'answer right now. Relevant entries:\n${bundle.factsPreview}';
+        'answer right now. Relevant entries:\n${bundle.factsPreview}\n\n'
+        '${_buildSourcesUsedSection(bundle.sourcesUsed)}';
   }
 
   Future<_VaultContextBundle> _buildVaultContextBundle({
@@ -744,6 +746,11 @@ class DojoService {
     final normalizedQuery = _normalizeQueryForVaultSearch(query);
     final contextLines = <String>[];
     final factLines = <String>[];
+    final sourceMap = <String, Set<String>>{};
+
+    void addSource(String uri, String key) {
+      sourceMap.putIfAbsent(uri, () => <String>{}).add(key);
+    }
 
     final recordsByName = await _recordRepository.searchByName(normalizedQuery);
     final attrsBySearch = await _attributeRepository.search(normalizedQuery);
@@ -764,6 +771,7 @@ class DojoService {
           '(${directRecord.uri})';
       contextLines.add(line);
       factLines.add(line);
+      addSource(directRecord.uri, 'display_name');
     }
 
     if (directAttributes.isNotEmpty) {
@@ -772,6 +780,7 @@ class DojoService {
             '${_truncateForPrompt(attr.value ?? '(deleted)', 120)}';
         contextLines.add(line);
         factLines.add(line);
+        addSource(attr.subjectUri, attr.key);
       }
     }
 
@@ -779,6 +788,7 @@ class DojoService {
       for (final record in recordsByName.take(6)) {
         final line = '- Record match: ${record.displayName} (${record.uri})';
         contextLines.add(line);
+        addSource(record.uri, 'display_name');
       }
     }
 
@@ -792,6 +802,7 @@ class DojoService {
             '${_truncateForPrompt(attr.value ?? '(deleted)', 120)}';
         contextLines.add(line);
         factLines.add(line);
+        addSource(attr.subjectUri, attr.key);
         if (seen.length >= 12) break;
       }
     }
@@ -817,12 +828,45 @@ class DojoService {
       contextLines.add('- No matching vault facts were found.');
     }
 
+    final sourcesUsed = _formatSourcesFromMap(sourceMap);
     final preview = factLines.take(4).join('\n');
     return _VaultContextBundle(
       context: contextLines.join('\n'),
       hasFacts: factLines.isNotEmpty,
       factsPreview: preview,
+      sourcesUsed: sourcesUsed,
     );
+  }
+
+  List<String> _formatSourcesFromMap(Map<String, Set<String>> sourceMap) {
+    if (sourceMap.isEmpty) {
+      return const [];
+    }
+
+    final uris = sourceMap.keys.toList(growable: false)..sort();
+    final lines = <String>[];
+    for (final uri in uris) {
+      final keys = sourceMap[uri]!.toList(growable: false)..sort();
+      lines.add('$uri -> ${keys.join(', ')}');
+    }
+    return lines;
+  }
+
+  String _buildSourcesUsedSection(List<String> sources) {
+    if (sources.isEmpty) {
+      return 'Sources used:\n- none';
+    }
+
+    final limited = sources.take(8).toList(growable: false);
+    final buffer = StringBuffer('Sources used:\n');
+    for (final line in limited) {
+      buffer.writeln('- $line');
+    }
+    final remaining = sources.length - limited.length;
+    if (remaining > 0) {
+      buffer.writeln('- ...and $remaining more');
+    }
+    return buffer.toString().trimRight();
   }
 
   String _truncateForPrompt(String text, int maxLength) {
@@ -1617,10 +1661,12 @@ class _VaultContextBundle {
   final String context;
   final bool hasFacts;
   final String factsPreview;
+  final List<String> sourcesUsed;
 
   const _VaultContextBundle({
     required this.context,
     required this.hasFacts,
     required this.factsPreview,
+    required this.sourcesUsed,
   });
 }
