@@ -1038,48 +1038,58 @@ class DojoService {
     List<JournalEntry> dayEntries, {
     required UserProfile? primaryUser,
   }) async {
+    final contextEntries = await _buildJournalFollowUpContextEntries(dayEntries);
+    final recentQuestions = _extractRecentSenseiQuestions(contextEntries);
+    final supplementalContext = await _buildJournalFollowUpSupplementalContext(
+      latestInput: input,
+      dayEntries: dayEntries,
+      contextEntries: contextEntries,
+      recentQuestions: recentQuestions,
+    );
+
     final llmResponse = await _tryLlmJournalResponse(
       prompt:
-          'New journal entry: "$input"\nRespond as Sensei with one useful '
-          'follow-up that improves day journaling quality.',
-      contextEntries: dayEntries,
+          'New journal entry: "$input"\nGenerate one high-value follow-up '
+          'question that helps the user journal better today.',
+      contextEntries: contextEntries,
       primaryUser: primaryUser,
       systemInstruction: _journalFollowUpSystemInstruction,
-      maxTokens: 240,
-      temperature: 0.25,
+      maxTokens: 220,
+      temperature: 0.55,
+      extraContext: supplementalContext,
     );
-    if (llmResponse != null) {
-      return llmResponse;
+    final normalizedQuestion = _normalizeJournalQuestion(llmResponse);
+    if (normalizedQuestion != null &&
+        !_isQuestionRepetitive(normalizedQuestion, recentQuestions)) {
+      return normalizedQuestion;
     }
 
-    final insights = _extractJournalInsights(dayEntries);
-    final followUps = <String>[];
-    if (!insights.hasMood) {
-      followUps.add('How did your mood shift throughout the day?');
-    }
-    if (!insights.hasPeople) {
-      followUps.add('Who did you spend time with or communicate with today?');
-    }
-    if (!insights.hasPlaces) {
-      followUps.add('What places did you go today?');
+    if (recentQuestions.isNotEmpty) {
+      final retryResponse = await _tryLlmJournalResponse(
+        prompt:
+            'The previous question was too similar to prior follow-ups. '
+            'Ask one different follow-up question that explores a new angle.\n'
+            'Avoid these prior questions:\n'
+            '${recentQuestions.take(8).map((q) => '- $q').join('\n')}',
+        contextEntries: contextEntries,
+        primaryUser: primaryUser,
+        systemInstruction: _journalFollowUpSystemInstruction,
+        maxTokens: 220,
+        temperature: 0.65,
+        extraContext: supplementalContext,
+      );
+      final retryQuestion = _normalizeJournalQuestion(retryResponse);
+      if (retryQuestion != null &&
+          !_isQuestionRepetitive(retryQuestion, recentQuestions)) {
+        return retryQuestion;
+      }
     }
 
-    if (followUps.isNotEmpty) {
-      final promptLines = followUps
-          .take(2)
-          .map((q) => '- $q')
-          .join('\n');
-      return 'Journal entry captured. Keep layering details so your day-end '
-          'summary stays useful.\n\n$promptLines';
-    }
-
-    final highlights = insights.highlights.take(3).toList(growable: false);
-    final highlightBlock = highlights.isEmpty
-        ? ''
-        : '\n\nRecent notes I can already use:\n'
-            '${highlights.map((h) => '- $h').join('\n')}';
-    return 'Great detail so far. What felt most important today, and what do '
-        'you want future-you to remember?$highlightBlock';
+    return _buildJournalFollowUpFallback(
+      input: input,
+      contextEntries: contextEntries,
+      recentQuestions: recentQuestions,
+    );
   }
 
   Future<String> _buildJournalRecallResponse(
@@ -1311,6 +1321,7 @@ class DojoService {
     required String systemInstruction,
     int maxTokens = 280,
     double temperature = 0.2,
+    String? extraContext,
   }) async {
     final llm = _senseiLlm;
     if (llm == null) {
@@ -1321,10 +1332,18 @@ class DojoService {
     if (entriesContext.isEmpty) {
       return null;
     }
+    final contextSections = <String>[
+      entriesContext,
+    ];
     final userProfile = _buildUserProfileSummary(primaryUser);
-    final contextBlock = userProfile == null
-        ? entriesContext
-        : '- User profile: $userProfile\n$entriesContext';
+    if (userProfile != null) {
+      contextSections.insert(0, '- User profile: $userProfile');
+    }
+    final supplemental = extraContext?.trim();
+    if (supplemental != null && supplemental.isNotEmpty) {
+      contextSections.add(supplemental);
+    }
+    final contextBlock = contextSections.join('\n');
 
     try {
       final response = await llm.answerWithContext(
@@ -1374,10 +1393,331 @@ class DojoService {
     return lines.join('\n');
   }
 
+  Future<List<JournalEntry>> _buildJournalFollowUpContextEntries(
+    List<JournalEntry> dayEntries,
+  ) async {
+    final recentEntries = await getRecentJournalEntries(limit: 800);
+    final mergedById = <String, JournalEntry>{};
+    for (final entry in recentEntries) {
+      mergedById[entry.id] = entry;
+    }
+    for (final entry in dayEntries) {
+      mergedById[entry.id] = entry;
+    }
+
+    final merged = mergedById.values.toList(growable: false)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    if (merged.length <= 48) {
+      return merged;
+    }
+    return merged.sublist(merged.length - 48);
+  }
+
+  Future<String> _buildJournalFollowUpSupplementalContext({
+    required String latestInput,
+    required List<JournalEntry> dayEntries,
+    required List<JournalEntry> contextEntries,
+    required List<String> recentQuestions,
+  }) async {
+    final nowKey = _journalDayKey(DateTime.now());
+    final recentRolos = await _roloRepository.getRecent(limit: 320);
+    final todayRoloLines = <String>[];
+    final historicalRoloLines = <String>[];
+    final seenRoloSummonings = <String>{};
+    for (final rolo in recentRolos) {
+      final text = rolo.summoningText.trim();
+      if (text.isEmpty) {
+        continue;
+      }
+      final normalized = _normalizeQuestionForComparison(text);
+      if (normalized.isNotEmpty && !seenRoloSummonings.add(normalized)) {
+        continue;
+      }
+
+      final line = '- ${_journalDayKey(rolo.timestamp)} '
+          '${_formatRoloTime(rolo.timestamp)}: ${_truncateForPrompt(text, 130)}';
+      if (_journalDayKey(rolo.timestamp) == nowKey) {
+        if (todayRoloLines.length < 18) {
+          todayRoloLines.add(line);
+        }
+      } else if (historicalRoloLines.length < 8) {
+        historicalRoloLines.add(line);
+      }
+
+      if (todayRoloLines.length >= 18 && historicalRoloLines.length >= 8) {
+        break;
+      }
+    }
+
+    final query = _normalizeQueryForVaultSearch(latestInput);
+    final relatedVaultFacts = <String>[];
+    if (query.trim().isNotEmpty) {
+      final attrs = await _attributeRepository.search(query);
+      for (final attr in attrs.take(8)) {
+        relatedVaultFacts.add(
+          '- ${attr.subjectUri}.${attr.key} = '
+          '${_truncateForPrompt(attr.value ?? '(deleted)', 90)}',
+        );
+      }
+    }
+
+    final insights = _extractJournalInsights(dayEntries);
+    final coverageSignals = <String>[
+      if (insights.moods.isNotEmpty) 'moods: ${insights.moods.join(', ')}',
+      if (insights.people.isNotEmpty) 'people: ${insights.people.join(', ')}',
+      if (insights.places.isNotEmpty) 'places: ${insights.places.join(', ')}',
+      if (insights.highlights.isNotEmpty)
+        'highlights: ${insights.highlights.take(3).map((h) => _truncateForPrompt(h, 70)).join(' | ')}',
+      if (!insights.hasMood) 'missing mood depth',
+      if (!insights.hasPeople) 'missing people interactions',
+      if (!insights.hasPlaces) 'missing place details',
+    ];
+
+    final journalLinesAnalyzed = contextEntries
+        .where((entry) => entry.content.trim().isNotEmpty)
+        .length;
+    final buffer = StringBuffer()
+      ..writeln('Journal coaching reference (expanded context):')
+      ..writeln('- Latest input: ${_truncateForPrompt(latestInput, 180)}')
+      ..writeln('- Journal lines analyzed: $journalLinesAnalyzed')
+      ..writeln('- Coverage signals: ${coverageSignals.join('; ')}')
+      ..writeln(
+        '- Recently asked Sensei questions to avoid repeating: '
+        '${recentQuestions.isEmpty ? 'none' : recentQuestions.take(8).join(' | ')}',
+      )
+      ..writeln('Web-inspired journal quality criteria:')
+      ..writeln(_journalWebInspiredQualityCriteria.map((q) => '- $q').join('\n'))
+      ..writeln('Web-inspired prompt angles (adapt to user context, do not copy verbatim):')
+      ..writeln(_journalWebInspiredPromptAngles.map((q) => '- $q').join('\n'))
+      ..writeln('Today text capture (from ledger rolos):')
+      ..writeln(
+        todayRoloLines.isEmpty
+            ? '- No additional same-day rolos captured.'
+            : todayRoloLines.join('\n'),
+      )
+      ..writeln('Relevant historical text (for continuity):')
+      ..writeln(
+        historicalRoloLines.isEmpty
+            ? '- No historical rolo snippets selected.'
+            : historicalRoloLines.join('\n'),
+      )
+      ..writeln('Related vault facts:')
+      ..writeln(
+        relatedVaultFacts.isEmpty
+            ? '- No directly related vault facts found.'
+            : relatedVaultFacts.join('\n'),
+      );
+    return buffer.toString().trimRight();
+  }
+
+  List<String> _extractRecentSenseiQuestions(
+    List<JournalEntry> entries, {
+    int limit = 12,
+  }) {
+    final sorted = [...entries]
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final questions = <String>[];
+    final seen = <String>{};
+    for (final entry in sorted) {
+      if (entry.role != JournalRole.sensei) {
+        continue;
+      }
+      final extracted = _extractQuestionCandidates(entry.content);
+      for (final question in extracted) {
+        final normalized = _normalizeQuestionForComparison(question);
+        if (normalized.isEmpty || !seen.add(normalized)) {
+          continue;
+        }
+        questions.add(question.trim());
+        if (questions.length >= limit) {
+          return questions;
+        }
+      }
+    }
+    return questions;
+  }
+
+  List<String> _extractQuestionCandidates(String text) {
+    final compact = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (compact.isEmpty) {
+      return const [];
+    }
+    final matches = RegExp(r'[^?]{8,}\?').allMatches(compact);
+    if (matches.isNotEmpty) {
+      return matches
+          .map((m) => m.group(0)!.trim())
+          .where((line) => line.length >= 8)
+          .toList(growable: false);
+    }
+    if (compact.endsWith('?') && compact.length >= 8) {
+      return <String>[compact];
+    }
+    return const [];
+  }
+
+  String? _normalizeJournalQuestion(String? raw) {
+    if (raw == null) {
+      return null;
+    }
+    var text = raw.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.isEmpty) {
+      return null;
+    }
+
+    text = text.replaceAll(RegExp(r'^(question|follow-up)\s*:\s*', caseSensitive: false), '');
+    final questionMatches = RegExp(r'[^?]{8,}\?').allMatches(text).toList();
+    if (questionMatches.isNotEmpty) {
+      text = questionMatches.first.group(0)!.trim();
+    } else if (!text.endsWith('?')) {
+      text = '$text?';
+    }
+
+    return text.trim();
+  }
+
+  bool _isQuestionRepetitive(String candidate, List<String> previousQuestions) {
+    final candidateNormalized = _normalizeQuestionForComparison(candidate);
+    if (candidateNormalized.isEmpty) {
+      return false;
+    }
+    final candidateTokens = _questionContentTokens(candidateNormalized);
+    for (final previous in previousQuestions) {
+      final previousNormalized = _normalizeQuestionForComparison(previous);
+      if (candidateNormalized == previousNormalized) {
+        return true;
+      }
+      final previousTokens = _questionContentTokens(previousNormalized);
+      if (candidateTokens.isEmpty || previousTokens.isEmpty) {
+        continue;
+      }
+      final overlap = candidateTokens.intersection(previousTokens).length;
+      final union = candidateTokens.union(previousTokens).length;
+      if (union > 0 && (overlap / union) >= 0.72) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Set<String> _questionContentTokens(String normalized) {
+    return normalized
+        .split(' ')
+        .where((token) => token.isNotEmpty && !_journalQuestionStopWords.contains(token))
+        .toSet();
+  }
+
+  String _normalizeQuestionForComparison(String text) {
+    return text
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9\s]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _buildJournalFollowUpFallback({
+    required String input,
+    required List<JournalEntry> contextEntries,
+    required List<String> recentQuestions,
+  }) {
+    final insights = _extractJournalInsights(contextEntries);
+    final highlights = insights.highlights.take(4).toList(growable: false);
+    final candidateQuestions = <String>[
+      if (highlights.isNotEmpty)
+        'You mentioned "${_truncateForPrompt(highlights.first, 75)}". '
+            'What detail from that moment feels most important to remember?',
+      if (!insights.hasMood)
+        'What emotion stayed with you the longest today, and what triggered it?',
+      if (!insights.hasPeople)
+        'Who shaped your energy the most today, and what happened in that interaction?',
+      if (!insights.hasPlaces)
+        'Which place influenced your day the most, and what stood out there?',
+      ..._journalWebInspiredPromptAngles,
+    ];
+
+    if (candidateQuestions.isEmpty) {
+      return 'What feels most important for future-you to remember from today?';
+    }
+
+    final seed = input.codeUnits.fold<int>(0, (sum, unit) => sum + unit) +
+        DateTime.now().millisecondsSinceEpoch ~/ 60000;
+    final start = seed % candidateQuestions.length;
+    for (var i = 0; i < candidateQuestions.length; i++) {
+      final question = candidateQuestions[(start + i) % candidateQuestions.length];
+      if (!_isQuestionRepetitive(question, recentQuestions)) {
+        return question;
+      }
+    }
+    return candidateQuestions[start];
+  }
+
   static const String _journalFollowUpSystemInstruction =
-      'You are Sensei in Journal Mode. Coach the user to capture high-value '
-      'day details. Prioritize missing: mood shifts, people interactions, '
-      'places visited, and key events. Keep response short and practical.';
+      'You are Sensei in Journal Mode. Generate exactly one short follow-up '
+      'question tailored to the user\'s latest entry and the full supplied '
+      'context. Avoid repeating any previously asked question. Use evidence '
+      'from context to choose the highest-value next prompt. Blend practical '
+      'journaling quality principles from public best-practice guidance '
+      '(specific event detail, emotional depth, reflection, meaning, '
+      'relationships, body signals, gratitude, and next-step clarity). '
+      'Ask only one question. Return the question text only.';
+
+  static const List<String> _journalWebInspiredQualityCriteria = <String>[
+    'Capture concrete events (who, where, what happened), not only labels.',
+    'Include emotional texture and body sensation where possible.',
+    'Record why moments mattered, not just what happened.',
+    'Note relationships and conversations that changed your state.',
+    'Extract one lesson or pattern from the day.',
+    'End with a clear next action or intention for tomorrow.',
+    'Balance challenge notes with gratitude or wins.',
+  ];
+
+  static const List<String> _journalWebInspiredPromptAngles = <String>[
+    'What happened right before your mood shifted most today?',
+    'What conversation or interaction changed your energy, and why?',
+    'What did your body signal (tension, fatigue, calm) during your key moment?',
+    'What detail would be missing if you reread this entry six months from now?',
+    'What felt unresolved today, and what is one next step you can take tomorrow?',
+    'What small win are you most grateful for today, and what enabled it?',
+    'What assumption did today challenge, and what did you learn from that?',
+    'What boundary or decision mattered most today, and how did it affect you?',
+    'What pattern keeps repeating lately that showed up again today?',
+    'What is one thing future-you will thank you for documenting tonight?',
+  ];
+
+  static const Set<String> _journalQuestionStopWords = <String>{
+    'a',
+    'an',
+    'and',
+    'are',
+    'as',
+    'at',
+    'be',
+    'did',
+    'do',
+    'for',
+    'from',
+    'how',
+    'i',
+    'in',
+    'is',
+    'it',
+    'me',
+    'my',
+    'of',
+    'on',
+    'or',
+    'that',
+    'the',
+    'to',
+    'today',
+    'was',
+    'what',
+    'where',
+    'which',
+    'who',
+    'with',
+    'you',
+    'your',
+  };
 
   static const String _journalRecallSystemInstruction =
       'You are Sensei answering recall questions from journal context only. '
