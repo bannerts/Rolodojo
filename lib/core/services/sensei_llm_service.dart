@@ -43,16 +43,43 @@ class LlmExtraction {
   /// Confidence score.
   final double confidence;
 
+  /// Whether context indicates this fact already exists in the vault.
+  final bool alreadyExists;
+
   const LlmExtraction({
     this.subjectName,
     this.attributeKey,
     this.attributeValue,
     this.isQuery = false,
     this.confidence = 0.0,
+    this.alreadyExists = false,
   });
 
   bool get canCreateAttribute =>
       subjectName != null && attributeKey != null && attributeValue != null;
+}
+
+/// Runtime debug snapshot for the most recent LLM parse attempt.
+class LlmParseDebugSnapshot {
+  final DateTime timestamp;
+  final LlmProvider provider;
+  final String model;
+  final String input;
+  final String contextBlock;
+  final String extractionPrompt;
+  final bool sentToProvider;
+  final String note;
+
+  const LlmParseDebugSnapshot({
+    required this.timestamp,
+    required this.provider,
+    required this.model,
+    required this.input,
+    required this.contextBlock,
+    required this.extractionPrompt,
+    required this.sentToProvider,
+    required this.note,
+  });
 }
 
 /// Supported LLM providers.
@@ -127,6 +154,8 @@ class LlmParsingContext {
   final List<String> recentSummonings;
   final List<String> recentTargetUris;
   final List<String> hintAttributes;
+  final List<String> knownRecordSummaries;
+  final List<String> knownFactSummaries;
 
   const LlmParsingContext({
     this.userProfileSummary,
@@ -134,6 +163,8 @@ class LlmParsingContext {
     this.recentSummonings = const [],
     this.recentTargetUris = const [],
     this.hintAttributes = const [],
+    this.knownRecordSummaries = const [],
+    this.knownFactSummaries = const [],
   });
 
   bool get hasAnyHints =>
@@ -141,7 +172,9 @@ class LlmParsingContext {
       (parserSubjectUriHint?.trim().isNotEmpty ?? false) ||
       recentSummonings.isNotEmpty ||
       recentTargetUris.isNotEmpty ||
-      hintAttributes.isNotEmpty;
+      hintAttributes.isNotEmpty ||
+      knownRecordSummaries.isNotEmpty ||
+      knownFactSummaries.isNotEmpty;
 }
 
 /// Connection and readiness state for the active provider.
@@ -187,6 +220,7 @@ abstract class SenseiLlmService {
   LlmProvider get currentProvider;
   List<LlmProvider> get supportedProviders;
   ValueListenable<LlmHealthStatus> get healthStatus;
+  ValueListenable<LlmParseDebugSnapshot?> get parseDebugSnapshot;
   bool isApiKeyConfigured(LlmProvider provider);
 
   Future<void> initialize({
@@ -336,6 +370,8 @@ class LocalLlmService implements SenseiLlmService {
   final HttpClient _httpClient = HttpClient();
   final ValueNotifier<LlmHealthStatus> _healthStatusNotifier =
       ValueNotifier(const LlmHealthStatus());
+  final ValueNotifier<LlmParseDebugSnapshot?> _parseDebugNotifier =
+      ValueNotifier<LlmParseDebugSnapshot?>(null);
   late final Map<LlmProvider, _ProviderConfig> _providerConfigs;
   final Map<LlmProvider, String> _activeModels = <LlmProvider, String>{};
   Uri? _activeGeminiBaseUri;
@@ -376,6 +412,10 @@ class LocalLlmService implements SenseiLlmService {
 
   @override
   ValueListenable<LlmHealthStatus> get healthStatus => _healthStatusNotifier;
+
+  @override
+  ValueListenable<LlmParseDebugSnapshot?> get parseDebugSnapshot =>
+      _parseDebugNotifier;
 
   @override
   bool isApiKeyConfigured(LlmProvider provider) {
@@ -734,26 +774,61 @@ class LocalLlmService implements SenseiLlmService {
     LlmParsingContext context = const LlmParsingContext(),
   }) async {
     final fallback = _ruleBasedExtraction(input);
+    final contextBlock = _buildContextBlock(context);
+    final extractionPrompt = _buildExtractionPrompt(
+      input,
+      context,
+      contextBlockOverride: contextBlock,
+    );
     if (input.trim().isEmpty) {
+      _recordParseDebugSnapshot(
+        input: input,
+        contextBlock: contextBlock,
+        extractionPrompt: extractionPrompt,
+        sentToProvider: false,
+        note: 'Input empty. Used rule-based fallback.',
+      );
       return fallback;
     }
 
     final health = await checkHealth();
     if (!health.isHealthy) {
+      _recordParseDebugSnapshot(
+        input: input,
+        contextBlock: contextBlock,
+        extractionPrompt: extractionPrompt,
+        sentToProvider: false,
+        note: 'Provider unhealthy. Used rule-based fallback.',
+      );
       return fallback;
     }
+
+    _recordParseDebugSnapshot(
+      input: input,
+      contextBlock: contextBlock,
+      extractionPrompt: extractionPrompt,
+      sentToProvider: true,
+      note: 'Sent extraction prompt to provider.',
+    );
 
     final stopwatch = Stopwatch()..start();
     try {
       final responseText = await _createCompletion(
         systemPrompt: '$_senseiCorePrompt\n$_extractionSystemPrompt',
-        userPrompt: _buildExtractionPrompt(input, context),
+        userPrompt: extractionPrompt,
         maxTokens: 180,
         temperature: 0.1,
       );
       final llmExtraction = _parseExtractionResponse(responseText);
       return _pickBestExtraction(fallback, llmExtraction);
     } catch (e) {
+      _recordParseDebugSnapshot(
+        input: input,
+        contextBlock: contextBlock,
+        extractionPrompt: extractionPrompt,
+        sentToProvider: true,
+        note: 'Provider request failed: $e',
+      );
       await _onRequestFailure(e);
       return fallback;
     } finally {
@@ -928,6 +1003,7 @@ class LocalLlmService implements SenseiLlmService {
     _httpClient.close(force: true);
     _isReady = false;
     _healthStatusNotifier.dispose();
+    _parseDebugNotifier.dispose();
     debugPrint('[Sensei LLM] Client disposed');
   }
 
@@ -1461,8 +1537,31 @@ class LocalLlmService implements SenseiLlmService {
     return '$_modelStoragePrefix${provider.id}';
   }
 
-  String _buildExtractionPrompt(String input, LlmParsingContext context) {
-    final contextBlock = _buildContextBlock(context);
+  void _recordParseDebugSnapshot({
+    required String input,
+    required String contextBlock,
+    required String extractionPrompt,
+    required bool sentToProvider,
+    required String note,
+  }) {
+    _parseDebugNotifier.value = LlmParseDebugSnapshot(
+      timestamp: DateTime.now().toUtc(),
+      provider: _currentProvider,
+      model: activeModelName,
+      input: input,
+      contextBlock: contextBlock,
+      extractionPrompt: extractionPrompt,
+      sentToProvider: sentToProvider,
+      note: note,
+    );
+  }
+
+  String _buildExtractionPrompt(
+    String input,
+    LlmParsingContext context, {
+    String? contextBlockOverride,
+  }) {
+    final contextBlock = contextBlockOverride ?? _buildContextBlock(context);
     return '''Extract structured data from this input.
 Return ONLY valid JSON with keys:
 - subject_name (string or null)
@@ -1470,6 +1569,9 @@ Return ONLY valid JSON with keys:
 - attribute_value (string or null)
 - is_query (boolean)
 - confidence (number 0..1)
+- already_exists (boolean; true only if context shows this exact fact already exists)
+
+$_scrollEthosContext
 
 $contextBlock
 Input: "$input"''';
@@ -1495,6 +1597,19 @@ Input: "$input"''';
     if (context.hintAttributes.isNotEmpty) {
       lines.add('- known_attribute_keys: ${context.hintAttributes.take(8).join(', ')}');
     }
+    if (context.knownRecordSummaries.isNotEmpty) {
+      final records = context.knownRecordSummaries
+          .take(6)
+          .map((s) => _truncate(s.replaceAll('\n', ' '), 120))
+          .join(' | ');
+      lines.add('- known_records: $records');
+    }
+    if (context.knownFactSummaries.isNotEmpty) {
+      lines.add('- known_vault_facts:');
+      for (final fact in context.knownFactSummaries.take(10)) {
+        lines.add('  - ${_truncate(fact.replaceAll('\n', ' '), 140)}');
+      }
+    }
     if (context.recentSummonings.isNotEmpty) {
       final cleaned = context.recentSummonings
           .take(3)
@@ -1511,17 +1626,50 @@ Input: "$input"''';
   }
 
   static const _senseiCorePrompt = '''You are the Sensei for ROLODOJO.
-You operate as a structured ledger assistant.
-Rules:
-- Use only information present in the input/context.
-- Preserve exact values for facts.
+You are a privacy-first, local-encrypted digital ledger assistant.
+You must stay aligned with the 8 scroll ethos and Prime Directive.
+
+Core mission:
+- Replace fragmented notes with a structured, URI-addressable vault of truth.
+- Minimize user friction while maximizing data integrity and auditability.
+
+Golden rules:
+- Privacy first: treat local-first behavior as default; never expose secrets.
+- Audit everything: no fact should be treated as valid without an audit source.
+- URI driven: represent entities as dojo.<category>.<identifier>.
+- Local sovereignty: user owns data and keys; Sensei is a servant.
+- Trust, but verify: avoid confident fabrication and avoid unsafe overwrites.
+
+Data and URI standards:
+- Valid categories: con (contact), ent (entity), med (medical), sys (system).
 - Attribute keys must be snake_case.
-- Dojo URIs follow dojo.<category>.<identifier>.
-- Valid categories include con (contact), ent (entity), med (medical), sys (system).
+- Preserve exact factual values.
+- Prefer title-cased display names for people and entities.
+- Dates/times should be ISO8601 when normalizing.
+
+Security and integrity rules:
+- Never include API keys, secrets, or key material in outputs.
+- In online-provider mode, still keep responses grounded in provided context only.
+- If information is missing, say it is missing; do not invent.
+- If context indicates a fact already exists, avoid redundant writes.
+
+Interaction style:
+- Tone must be grounded, concise, and professional.
+- Prefer clear, actionable responses over verbose speculation.
 - Return strict machine-readable output when requested.''';
 
-  static const _extractionSystemPrompt = '''Extract subject, attribute key/value, and query intent.
-If extraction is uncertain, lower confidence and keep fields null.''';
+  static const String _scrollEthosContext = '''Ethos context from ROLODOJO scrolls:
+- Prime Directive: privacy-first local encrypted vault with absolute auditing.
+- Rockstone philosophy: preserve long-term schema integrity and traceability.
+- Every attribute change must link to a source event (last_rolo_id).
+- Owner profile belongs in tbl_user (not mixed with contact records).
+- Sensei responses are journaled and linked to input rolos.
+- Prefer confirmation-safe behavior over silent destructive correction.''';
+
+  static const _extractionSystemPrompt =
+      '''Extract subject, attribute key/value, and query intent.
+If extraction is uncertain, lower confidence and keep fields null.
+If context already contains the exact same subject + key + value fact, set already_exists=true.''';
 
   static const _synthesisSystemPrompt =
       'Generate one concise, factual insight from provided ledger facts.';
@@ -1558,6 +1706,10 @@ Rules:
     final isQuery =
         _toBool(parsed['is_query'] ?? parsed['isQuery'], fallback: false);
     final confidence = _toDouble(parsed['confidence'], fallback: 0.82);
+    final alreadyExists = _toBool(
+      parsed['already_exists'] ?? parsed['alreadyExists'],
+      fallback: false,
+    );
 
     return LlmExtraction(
       subjectName: subjectName,
@@ -1566,6 +1718,7 @@ Rules:
       attributeValue: attributeValue,
       isQuery: isQuery,
       confidence: confidence.clamp(0.0, 1.0).toDouble(),
+      alreadyExists: alreadyExists,
     );
   }
 

@@ -48,6 +48,7 @@ class _SettingsPageState extends State<SettingsPage> {
   SenseiLlmService? _senseiLlm;
   LlmProvider _selectedProvider = LlmProvider.localLlama;
   LlmHealthStatus _llmHealthStatus = const LlmHealthStatus();
+  LlmParseDebugSnapshot? _lastParseDebugSnapshot;
   Map<String, dynamic> _userProfilePayload = const {};
 
   @override
@@ -68,6 +69,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void dispose() {
     _senseiLlm?.healthStatus.removeListener(_handleLlmHealthChanged);
+    _senseiLlm?.parseDebugSnapshot.removeListener(_handleParseDebugChanged);
     _displayNameController.dispose();
     _preferredNameController.dispose();
     _timezoneController.dispose();
@@ -83,10 +85,13 @@ class _SettingsPageState extends State<SettingsPage> {
     }
 
     _senseiLlm?.healthStatus.removeListener(_handleLlmHealthChanged);
+    _senseiLlm?.parseDebugSnapshot.removeListener(_handleParseDebugChanged);
     _senseiLlm = nextService;
     _senseiLlm!.healthStatus.addListener(_handleLlmHealthChanged);
+    _senseiLlm!.parseDebugSnapshot.addListener(_handleParseDebugChanged);
     _selectedProvider = _senseiLlm!.currentProvider;
     _llmHealthStatus = _senseiLlm!.healthStatus.value;
+    _lastParseDebugSnapshot = _senseiLlm!.parseDebugSnapshot.value;
 
     if (_llmHealthStatus.checkedAt == null) {
       unawaited(_refreshLlmHealth());
@@ -99,6 +104,16 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() {
       _selectedProvider = _senseiLlm?.currentProvider ?? _selectedProvider;
       _llmHealthStatus = next;
+    });
+  }
+
+  void _handleParseDebugChanged() {
+    final snapshot = _senseiLlm?.parseDebugSnapshot.value;
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _lastParseDebugSnapshot = snapshot;
     });
   }
 
@@ -300,6 +315,15 @@ class _SettingsPageState extends State<SettingsPage> {
               onTap: _selectedProvider.isLocal || _isSavingApiKey
                   ? null
                   : _showApiKeyEditorDialog,
+            ),
+            const Divider(color: DojoColors.border, height: 1),
+            _buildSettingsTile(
+              icon: Icons.bug_report_outlined,
+              title: 'Prompt Context Inspector',
+              subtitle: _promptInspectorSubtitle(),
+              trailing:
+                  const Icon(Icons.chevron_right, color: DojoColors.textHint),
+              onTap: _showPromptContextInspectorDialog,
             ),
           ]),
 
@@ -739,6 +763,175 @@ class _SettingsPageState extends State<SettingsPage> {
       return 'API key configured (stored on this device)';
     }
     return 'Missing API key. Tap to add.';
+  }
+
+  String _promptInspectorSubtitle() {
+    final snapshot = _lastParseDebugSnapshot;
+    if (snapshot == null) {
+      return 'No parse captured yet. Submit a summoning.';
+    }
+
+    final sentLabel = snapshot.sentToProvider ? 'sent' : 'fallback';
+    final local = snapshot.timestamp.toLocal();
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
+    final ss = local.second.toString().padLeft(2, '0');
+    return 'Last parse $sentLabel via ${snapshot.provider.label} at $hh:$mm:$ss';
+  }
+
+  void _showPromptContextInspectorDialog() {
+    final snapshot = _lastParseDebugSnapshot;
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        if (snapshot == null) {
+          return AlertDialog(
+            backgroundColor: DojoColors.graphite,
+            title: const Text(
+              'Prompt Context Inspector',
+              style: TextStyle(color: DojoColors.textPrimary),
+            ),
+            content: const Text(
+              'No parse context has been captured yet. Submit a summoning to populate this panel.',
+              style: TextStyle(color: DojoColors.textSecondary),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          );
+        }
+
+        final localTime = snapshot.timestamp.toLocal();
+        final timestamp =
+            '${localTime.year}-${localTime.month.toString().padLeft(2, '0')}-'
+            '${localTime.day.toString().padLeft(2, '0')} '
+            '${localTime.hour.toString().padLeft(2, '0')}:'
+            '${localTime.minute.toString().padLeft(2, '0')}:'
+            '${localTime.second.toString().padLeft(2, '0')}';
+
+        Widget buildCodeBlock(String text) {
+          return Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(DojoDimens.paddingSmall),
+            decoration: BoxDecoration(
+              color: DojoColors.slate,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: DojoColors.border),
+            ),
+            child: SelectableText(
+              text,
+              style: const TextStyle(
+                color: DojoColors.textSecondary,
+                fontSize: 12,
+                fontFamily: 'monospace',
+                height: 1.35,
+              ),
+            ),
+          );
+        }
+
+        return AlertDialog(
+          backgroundColor: DojoColors.graphite,
+          title: const Row(
+            children: [
+              Icon(Icons.bug_report_outlined, color: DojoColors.senseiGold),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Prompt Context Inspector',
+                  style: TextStyle(color: DojoColors.textPrimary),
+                ),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 700,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Provider: ${snapshot.provider.label}',
+                    style: const TextStyle(
+                      color: DojoColors.textPrimary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Model: ${snapshot.model}',
+                    style: const TextStyle(color: DojoColors.textSecondary),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Captured: $timestamp',
+                    style: const TextStyle(color: DojoColors.textSecondary),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Sent to provider: ${snapshot.sentToProvider ? 'yes' : 'no (fallback used)'}',
+                    style: TextStyle(
+                      color: snapshot.sentToProvider
+                          ? DojoColors.success
+                          : DojoColors.alert,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Note: ${snapshot.note}',
+                    style: const TextStyle(color: DojoColors.textHint, fontSize: 12),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Input',
+                    style: TextStyle(
+                      color: DojoColors.senseiGold,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  buildCodeBlock(snapshot.input),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Exact Context Block Sent',
+                    style: TextStyle(
+                      color: DojoColors.senseiGold,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  buildCodeBlock(snapshot.contextBlock),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Full Extraction Prompt Payload',
+                    style: TextStyle(
+                      color: DojoColors.senseiGold,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  buildCodeBlock(snapshot.extractionPrompt),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _showApiKeyEditorDialog() async {
