@@ -296,7 +296,14 @@ class DojoService {
         primaryUser: resolvedPrimaryUser,
       );
     } else {
-      message = 'Input recorded. Unable to extract structured data.';
+      final llm = _senseiLlm;
+      final llmUnavailable = llm != null && !llm.healthStatus.value.isHealthy;
+      if (llmUnavailable) {
+        message = 'Input recorded, but Sensei LLM is unavailable. '
+            'No structured vault fact was extracted yet.';
+      } else {
+        message = 'Input recorded. Unable to extract structured data.';
+      }
     }
 
     if (persistSenseiResponse) {
@@ -957,15 +964,14 @@ class DojoService {
       journalBundle.sourcesUsed,
     );
 
-    if (bundle.directAnswer != null) {
-      return '${bundle.directAnswer}\n\n'
-          '${_buildSourcesUsedSection(combinedSources)}';
-    }
-
     if (_senseiLlm != null) {
       try {
+        final llmQuestion = bundle.directAnswer != null
+            ? '$query\nUse this verified vault answer candidate if it matches '
+                'the context: ${bundle.directAnswer}'
+            : query;
         final llmAnswer = await _senseiLlm!.answerWithVault(
-          question: query,
+          question: llmQuestion,
           vaultContext: combinedContext,
           userProfileSummary: _buildUserProfileSummary(primaryUser),
         );
@@ -976,6 +982,11 @@ class DojoService {
       } catch (e) {
         debugPrint('[DojoService] Query answer via LLM failed: $e');
       }
+    }
+
+    if (bundle.directAnswer != null) {
+      return '${bundle.directAnswer}\n\n'
+          '${_buildSourcesUsedSection(combinedSources)}';
     }
 
     if (!bundle.hasFacts && !journalBundle.hasFacts) {
@@ -1612,10 +1623,8 @@ class DojoService {
       }
     }
 
-    return _buildJournalFollowUpFallback(
-      input: input,
-      contextEntries: contextEntries,
-      recentQuestions: recentQuestions,
+    return _journalLlmUnavailableMessage(
+      responseKind: 'follow-up question',
     );
   }
 
@@ -1657,9 +1666,8 @@ class DojoService {
       return retryAnswer;
     }
 
-    return _buildJournalQuestionFallback(
-      input: input,
-      contextEntries: contextEntries,
+    return _journalLlmUnavailableMessage(
+      responseKind: 'answer',
     );
   }
 
@@ -1680,38 +1688,9 @@ class DojoService {
       return llmResponse;
     }
 
-    final lower = input.toLowerCase();
-    final insights = _extractJournalInsights(dayEntries);
-    if (!insights.hasAnyData) {
-      return 'I do not have enough journal detail yet for recall. '
-          'Add mood, people, and places as your day unfolds.';
-    }
-
-    if ((lower.contains('who') && lower.contains('met')) ||
-        lower.contains('people')) {
-      return 'People mentioned today: '
-          '${insights.people.isEmpty ? 'none logged yet' : insights.people.join(', ')}.';
-    }
-
-    if (lower.contains('where') ||
-        lower.contains('place') ||
-        lower.contains('went')) {
-      return 'Places logged today: '
-          '${insights.places.isEmpty ? 'none logged yet' : insights.places.join(', ')}.';
-    }
-
-    if (lower.contains('mood') ||
-        lower.contains('feel') ||
-        lower.contains('emotion')) {
-      return 'Mood signals today: '
-          '${insights.moods.isEmpty ? 'not clearly logged yet' : insights.moods.join(', ')}.';
-    }
-
-    final highlights = insights.highlights.take(4).toList(growable: false);
-    final summaryLines = highlights.isEmpty
-        ? '- Journal data exists, but no clear highlight lines were detected yet.'
-        : highlights.map((h) => '- $h').join('\n');
-    return 'So far today, here is what you logged:\n$summaryLines';
+    return _journalLlmUnavailableMessage(
+      responseKind: 'recall answer',
+    );
   }
 
   Future<String> _buildDailySummaryBlock(
@@ -1734,64 +1713,9 @@ class DojoService {
     if (llmSummary != null) {
       return llmSummary;
     }
-
-    final insights = _extractJournalInsights(entries);
-    final userCount = entries.where((e) => e.role == JournalRole.user).length;
-    final senseiCount = entries.where((e) => e.role == JournalRole.sensei).length;
-
-    var llmNarrative = '';
-    final narrativeSource = _buildJournalNarrative(entries);
-    if (narrativeSource.isNotEmpty && _senseiLlm != null && _senseiLlm!.isReady) {
-      try {
-        llmNarrative = await _senseiLlm!.summarize(
-          narrativeSource,
-          maxLength: 720,
-        );
-      } catch (_) {
-        llmNarrative = '';
-      }
-    }
-
-    final highlights = insights.highlights.take(5).toList(growable: false);
-    final buffer = StringBuffer()
-      ..writeln('=== JOURNAL SUMMARY (${_journalDayKey(day)}) ===')
-      ..writeln(
-        'Mood: ${insights.moods.isEmpty ? 'Not specified' : insights.moods.join(', ')}',
-      )
-      ..writeln(
-        'People: ${insights.people.isEmpty ? 'Not specified' : insights.people.join(', ')}',
-      )
-      ..writeln(
-        'Places: ${insights.places.isEmpty ? 'Not specified' : insights.places.join(', ')}',
-      )
-      ..writeln('Entries captured: $userCount user / $senseiCount Sensei')
-      ..writeln('Highlights:');
-
-    if (highlights.isEmpty) {
-      buffer.writeln('- No detailed highlights captured yet.');
-    } else {
-      for (final highlight in highlights) {
-        buffer.writeln('- $highlight');
-      }
-    }
-
-    if (llmNarrative.trim().isNotEmpty) {
-      buffer
-        ..writeln()
-        ..writeln('Condensed narrative:')
-        ..writeln(llmNarrative.trim());
-    }
-
-    buffer
-      ..writeln()
-      ..writeln('Reflection prompt:')
-      ..writeln(
-        insights.hasMood && insights.hasPeople && insights.hasPlaces
-            ? 'What should tomorrow-you repeat or improve based on today?'
-            : 'Add missing mood/people/place details to strengthen this day log.',
-      );
-
-    return buffer.toString().trimRight();
+    return _journalLlmUnavailableMessage(
+      responseKind: 'daily summary',
+    );
   }
 
   Future<String> _buildWeeklySummaryBlock(
@@ -1818,71 +1742,9 @@ class DojoService {
     if (llmSummary != null) {
       return llmSummary;
     }
-
-    final byDate = <String, List<JournalEntry>>{};
-    for (final entry in weekEntries) {
-      byDate.putIfAbsent(entry.journalDate, () => <JournalEntry>[]).add(entry);
-    }
-
-    final aggregateMood = <String>{};
-    final aggregatePeople = <String>{};
-    final aggregatePlaces = <String>{};
-    final dailyLines = <String>[];
-    var daysLogged = 0;
-
-    for (var i = 0; i < 7; i++) {
-      final day = weekStart.add(Duration(days: i));
-      final dayKey = _journalDayKey(day);
-      final dayRows = byDate[dayKey] ?? const <JournalEntry>[];
-      if (dayRows.isEmpty) {
-        continue;
-      }
-
-      daysLogged++;
-      final dayInsights = _extractJournalInsights(dayRows);
-      aggregateMood.addAll(dayInsights.moods);
-      aggregatePeople.addAll(dayInsights.people);
-      aggregatePlaces.addAll(dayInsights.places);
-
-      final lead = dayInsights.highlights.isNotEmpty
-          ? dayInsights.highlights.first
-          : 'Journal activity logged.';
-      dailyLines.add('- ${_weekdayLabel(day)} ($dayKey): $lead');
-    }
-
-    final buffer = StringBuffer()
-      ..writeln(
-        '=== WEEKLY JOURNAL SUMMARY '
-        '(${_journalDayKey(weekStart)} to ${_journalDayKey(weekEnd)}) ===',
-      )
-      ..writeln('Days logged: $daysLogged/7')
-      ..writeln(
-        'Mood trends: ${aggregateMood.isEmpty ? 'Not enough data' : aggregateMood.join(', ')}',
-      )
-      ..writeln(
-        'People mentioned: ${aggregatePeople.isEmpty ? 'Not enough data' : aggregatePeople.join(', ')}',
-      )
-      ..writeln(
-        'Places visited: ${aggregatePlaces.isEmpty ? 'Not enough data' : aggregatePlaces.join(', ')}',
-      )
-      ..writeln('Daily breakdown:');
-
-    if (dailyLines.isEmpty) {
-      buffer.writeln('- No journal entries found for this week.');
-    } else {
-      for (final line in dailyLines) {
-        buffer.writeln(line);
-      }
-    }
-
-    buffer
-      ..writeln()
-      ..writeln('Next-week focus:')
-      ..writeln(
-        'Keep logging mood shifts, people interactions, and locations each day for richer patterns.',
-      );
-
-    return buffer.toString().trimRight();
+    return _journalLlmUnavailableMessage(
+      responseKind: 'weekly summary',
+    );
   }
 
   Future<String?> _tryLlmJournalResponse({
@@ -1900,15 +1762,15 @@ class DojoService {
     }
 
     final entriesContext = _buildJournalContextBlock(contextEntries);
-    if (entriesContext.isEmpty) {
-      return null;
-    }
-    final contextSections = <String>[
-      entriesContext,
-    ];
+    final contextSections = <String>[];
     final userProfile = _buildUserProfileSummary(primaryUser);
     if (userProfile != null) {
-      contextSections.insert(0, '- User profile: $userProfile');
+      contextSections.add('- User profile: $userProfile');
+    }
+    if (entriesContext.isNotEmpty) {
+      contextSections.add(entriesContext);
+    } else {
+      contextSections.add('- No journal context entries available yet.');
     }
     final supplemental = extraContext?.trim();
     if (supplemental != null && supplemental.isNotEmpty) {
@@ -1930,6 +1792,21 @@ class DojoService {
       debugPrint('[DojoService] Journal LLM response failed: $e');
       return null;
     }
+  }
+
+  String _journalLlmUnavailableMessage({
+    required String responseKind,
+  }) {
+    final llm = _senseiLlm;
+    if (llm == null) {
+      return 'Sensei could not generate a $responseKind because no LLM '
+          'provider is configured.';
+    }
+    final status = llm.healthStatus.value;
+    final statusMessage = status.message.trim();
+    return 'Sensei could not generate a $responseKind because the '
+        '${status.provider.label} provider is unavailable. '
+        '${statusMessage.isEmpty ? 'Check LLM settings and try again.' : statusMessage}';
   }
 
   String _buildJournalContextBlock(List<JournalEntry> entries) {
@@ -2655,6 +2532,13 @@ class DojoService {
     }
 
     final lower = trimmed.toLowerCase();
+    if (lower.contains('suggestion') ||
+        lower.contains('recommendation') ||
+        lower.contains('food idea') ||
+        lower.contains('meal idea') ||
+        lower.contains('what to eat')) {
+      return true;
+    }
     const starters = <String>[
       'what ',
       'who ',

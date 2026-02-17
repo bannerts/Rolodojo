@@ -795,13 +795,14 @@ class LocalLlmService implements SenseiLlmService {
     }
 
     final health = await checkHealth();
-    if (!health.isHealthy) {
+    final canAttemptProvider = _canAttemptLlmRequest(health);
+    if (!canAttemptProvider) {
       _recordParseDebugSnapshot(
         input: input,
         contextBlock: contextBlock,
         extractionPrompt: extractionPrompt,
         sentToProvider: false,
-        note: 'Provider unhealthy. Used rule-based fallback.',
+        note: 'Provider unavailable. Used rule-based fallback.',
       );
       return fallback;
     }
@@ -811,7 +812,9 @@ class LocalLlmService implements SenseiLlmService {
       contextBlock: contextBlock,
       extractionPrompt: extractionPrompt,
       sentToProvider: true,
-      note: 'Sent extraction prompt to provider.',
+      note: health.isHealthy
+          ? 'Sent extraction prompt to provider.'
+          : 'Provider health check failed; sent best-effort extraction request.',
     );
 
     final stopwatch = Stopwatch()..start();
@@ -853,7 +856,7 @@ class LocalLlmService implements SenseiLlmService {
     List<String> recentRolos = const [],
   }) async {
     final health = await checkHealth();
-    if (!health.isHealthy) {
+    if (!_canAttemptLlmRequest(health)) {
       return const LlmResult(text: '', confidence: 0.0, inferenceTimeMs: 0);
     }
 
@@ -905,7 +908,7 @@ class LocalLlmService implements SenseiLlmService {
 
     final context = vaultContext.trim();
     final health = await checkHealth();
-    if (!health.isHealthy) {
+    if (!_canAttemptLlmRequest(health)) {
       return _ruleBasedVaultAnswer(trimmedQuestion, context);
     }
 
@@ -945,7 +948,7 @@ class LocalLlmService implements SenseiLlmService {
     }
 
     final health = await checkHealth();
-    if (!health.isHealthy) {
+    if (!_canAttemptLlmRequest(health)) {
       return '';
     }
 
@@ -978,7 +981,7 @@ class LocalLlmService implements SenseiLlmService {
     }
 
     final health = await checkHealth();
-    if (!health.isHealthy) {
+    if (!_canAttemptLlmRequest(health)) {
       return _ruleBasedSummary(text, maxLength);
     }
 
@@ -1140,6 +1143,18 @@ class LocalLlmService implements SenseiLlmService {
       throw const FormatException('Empty Gemini completion content.');
     }
     return content;
+  }
+
+  bool _canAttemptLlmRequest(LlmHealthStatus health) {
+    if (_currentProvider.requiresApiKey && !_activeConfig.hasApiKey) {
+      return false;
+    }
+    if (health.isHealthy) {
+      return true;
+    }
+    // Best-effort mode: still attempt requests when credentials are present.
+    // This avoids stale/strict health checks blocking real responses.
+    return true;
   }
 
   String _parseOpenAiCompletion(Map<String, dynamic> response) {
